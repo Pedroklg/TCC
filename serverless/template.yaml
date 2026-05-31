@@ -1,0 +1,109 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  PetClinic serverless (FaaS) — domínio refatorado em funções via spring-cloud-function.
+  Cada função é uma Lambda independente (responsabilidade única), selecionada por
+  SPRING_CLOUD_FUNCTION_DEFINITION, exposta pelo API Gateway. Reúsa o domínio do
+  monolito (mesma base e versões).
+
+Globals:
+  Function:
+    Runtime: java17
+    MemorySize: 2048   # mais memória = mais CPU no Lambda → cold start mais rápido
+    Timeout: 240       # cold start do Spring Boot é pesado; folga para validação local
+    CodeUri: target/spring-petclinic-serverless-1.0.0-aws.jar
+    Handler: org.springframework.cloud.function.adapter.aws.FunctionInvoker
+    Environment:
+      Variables:
+        # O uber-jar achatado não carrega Start-Class no manifesto; o FunctionInvoker
+        # localiza a classe @SpringBootApplication por esta variável.
+        MAIN_CLASS: org.springframework.samples.petclinic.serverless.ServerlessApplication
+        # MySQL compartilhado (no sam local, o host é alcançado por host.docker.internal).
+        MYSQL_URL: jdbc:mysql://host.docker.internal:3306/petclinic
+        MYSQL_USER: petclinic
+        MYSQL_PASS: petclinic
+
+Resources:
+  GetAllOwners:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: tcc-getAllOwners
+      Environment:
+        Variables:
+          SPRING_CLOUD_FUNCTION_DEFINITION: getAllOwners
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /api/owners
+            Method: get
+
+  GetOwnerById:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: tcc-getOwnerById
+      Environment:
+        Variables:
+          SPRING_CLOUD_FUNCTION_DEFINITION: getOwnerById
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /api/owners/{ownerId}
+            Method: get
+
+  ListVets:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: tcc-listVets
+      Environment:
+        Variables:
+          SPRING_CLOUD_FUNCTION_DEFINITION: listVets
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /api/vets
+            Method: get
+
+  ListPetTypes:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: tcc-listPetTypes
+      Environment:
+        Variables:
+          SPRING_CLOUD_FUNCTION_DEFINITION: listPetTypes
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /api/pettypes
+            Method: get
+
+  CreateOwner:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: tcc-createOwner
+      Environment:
+        Variables:
+          SPRING_CLOUD_FUNCTION_DEFINITION: createOwner
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /api/owners
+            Method: post
+
+  CreateVisit:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: tcc-createVisit
+      Environment:
+        Variables:
+          SPRING_CLOUD_FUNCTION_DEFINITION: createVisit
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /api/owners/{ownerId}/pets/{petId}/visits
+            Method: post
