@@ -6,7 +6,7 @@
 # Uso: .\infra\reset-db.ps1 -Target mono|micro
 #
 # Na AWS o banco é remoto — o equivalente é aplicar os mesmos data.sql no MySQL
-# da nuvem (ver docs/fase7-aws.md).
+# da nuvem (a EC2 do MySQL já é semeada no boot pelo Terraform).
 
 param(
   [Parameter(Mandatory)][ValidateSet('mono', 'micro')][string]$Target

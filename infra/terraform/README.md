@@ -1,10 +1,11 @@
-# Terraform — infraestrutura AWS do TCC
+# Terraform — infraestrutura AWS (PetClinic)
 
-IaC das três arquiteturas. Ver o planejamento completo em
-[../../docs/fase7-aws.md](../../docs/fase7-aws.md).
+IaC das três arquiteturas (EC2 monolito · ECS Fargate microsserviços · Lambda + API
+Gateway serverless), MySQL compartilhado e AWS Budget.
 
-> 🔴 **Nada aqui foi aplicado.** `terraform apply` só na Fase 7, **com o Budget
-> primeiro**, em janelas curtas, com `terraform destroy` ao fim.
+> 🔴 **`terraform apply` sempre com o Budget primeiro**, em janelas curtas, com
+> `terraform destroy` ao fim de cada medição (controle de custo). Estimativa
+> **< US$ 5** com disciplina (teto do Budget em US$ 20).
 
 ## Escolhas (aprovadas)
 - Microsserviços: **ECS Fargate + Service Connect** (serviços independentes).
@@ -12,14 +13,16 @@ IaC das três arquiteturas. Ver o planejamento completo em
 - Lambda: **em VPC** alcançando o MySQL (sem NAT).
 - Estado: **local** (`.tfstate` gitignorado — necessário para o `destroy`, não perca).
 
-## Pré-requisitos
-1. `aws configure` (Access Key/Secret do usuário IAM; region us-east-1).
-2. Par de chaves EC2 criado no console → nome em `key_name`.
-3. Seu IP: `curl ifconfig.me` → `my_ip_cidr = "x.x.x.x/32"`.
-4. Artefatos buildados localmente (o Terraform sobe no S3):
+## Pré-requisitos (passos manuais na AWS)
+1. Usuário IAM **AdministratorAccess + MFA**; `aws configure` (Access Key/Secret; region us-east-1).
+2. **Habilitar acesso ao Billing** — como root: *Account → IAM user and role access to
+   Billing information → Activate*. **Sem isso o módulo `00-budget` falha.**
+3. Par de chaves EC2 criado no console → nome em `key_name`.
+4. Seu IP: `curl ifconfig.me` → `my_ip_cidr = "x.x.x.x/32"`.
+5. Artefatos buildados localmente (o Terraform sobe no S3):
    - monolito: `cd apps/monolith && .\mvnw.cmd -DskipTests package` (gera `-exec.jar`)
    - serverless: `cd serverless && .\mvnw.cmd -DskipTests package` (gera `-aws.jar`)
-5. `terraform.tfvars` (copiar do `.example`).
+6. `terraform.tfvars` (copiar do `.example`) — nos **dois** módulos (`00-budget/` e a raiz).
 
 ## Ordem de aplicação
 ```powershell
@@ -51,7 +54,7 @@ cd infra\terraform ; terraform destroy
 # (o budget pode ficar) ; conferir no console que nada sobrou; olhar o Billing
 ```
 
-## Avisos de validação (validar no `plan/apply` da Fase 7)
+## Avisos (validar no `terraform plan/apply`)
 - **Microsserviços** é o braço mais sensível: ordem de subida (config/discovery
   primeiro — os apps fazem retry, então sobe eventualmente), Service Connect e o
   health check do gateway podem pedir ajuste fino.

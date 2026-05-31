@@ -28,13 +28,11 @@ Stack: Java 17, Spring Boot 4.0.6, MySQL 8.4. Serverless: spring-cloud-function 
 ├── serverless/        # app FaaS (spring-cloud-function) — reúsa o domínio do monolito
 ├── load-tests/        # cenários k6 (constante, rampa, pico) + workload + runner
 ├── analysis/          # análise das métricas (Python) + cold start
-├── infra/
-│   ├── docker-compose.mysql.yml            # MySQL compartilhado (local)
-│   ├── docker-compose.microservices.yml    # stack de microsserviços (local)
-│   ├── reset-db.ps1                         # reset do banco ao baseline entre repetições
-│   └── terraform/                           # IaC da AWS (EC2, ECS, Lambda, API GW, Budget)
-└── docs/
-    └── fase7-aws.md   # plano de provisionamento na AWS
+└── infra/
+    ├── docker-compose.mysql.yml            # MySQL compartilhado (local)
+    ├── docker-compose.microservices.yml    # stack de microsserviços (local)
+    ├── reset-db.ps1                         # reset do banco ao baseline entre repetições
+    └── terraform/                           # IaC da AWS (EC2, ECS, Lambda, API GW, Budget) + README
 ```
 
 > Os repositórios **oficiais** do PetClinic (monolito e microsserviços) **não** são
@@ -88,8 +86,8 @@ python analysis/coldstart.py
 Detalhes em [load-tests/README.md](load-tests/README.md) e [analysis/README.md](analysis/README.md).
 
 ## Provisionamento na AWS
-A infraestrutura das três arquiteturas está em [infra/terraform/](infra/terraform/);
-o plano completo (recursos, custos, passos, *teardown*) em [docs/fase7-aws.md](docs/fase7-aws.md).
+A infraestrutura das três arquiteturas (recursos, pré-requisitos, ordem de aplicação,
+custos e *teardown*) está em [infra/terraform/](infra/terraform/) — ver o seu README.
 **O AWS Budget é sempre o primeiro recurso**, e a infraestrutura deve ser derrubada
 (`terraform destroy`) após cada janela de medição.
 

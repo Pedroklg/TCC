@@ -21,6 +21,9 @@ __pycache__/
 serverless/.aws-sam/
 samconfig.toml
 
+# Documento de planejamento interno (não publicado)
+docs/fase7-aws.md
+
 # Misc
 *.log
 ~$*.docx
