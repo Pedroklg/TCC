@@ -1,0 +1,8 @@
+PetClinic — Comparação de Arquiteturas (Monolito × Microsserviços × Serverless)
+Copyright 2026 Pedro Gabriel
+
+Software desenvolvido como parte de um Trabalho de Conclusão de Curso
+(Engenharia de Software — UEPG).
+
+Baseia-se no benchmark Spring PetClinic (https://github.com/spring-petclinic),
+licenciado sob a Apache License 2.0.

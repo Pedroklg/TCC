@@ -95,3 +95,7 @@ custos e *teardown*) está em [infra/terraform/](infra/terraform/) — ver o seu
 Tempo de resposta (média, p95, p99), throughput (req/s) e taxa de erro (%). Para a
 serverless, também tempo de inicialização **cold start × warm start** nos dois
 subcenários (sem otimização × SnapStart).
+
+## Licença
+Distribuído sob a **Apache License 2.0** — ver [LICENSE](LICENSE) e [NOTICE](NOTICE).
+Baseia-se no [Spring PetClinic](https://github.com/spring-petclinic), também Apache-2.0.
