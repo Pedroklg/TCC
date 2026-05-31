@@ -1,0 +1,15 @@
+# Normaliza finais de linha no repositório (checkout em LF por padrão).
+* text=auto eol=lf
+
+# Scripts específicos de Windows mantêm CRLF.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Shell e wrapper Maven SEMPRE em LF (executam em Linux — EC2/Lambda/contêiner).
+*.sh  text eol=lf
+mvnw  text eol=lf
+
+# Binários.
+*.jar binary
+*.png binary
