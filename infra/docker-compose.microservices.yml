@@ -1,0 +1,145 @@
+# Microsserviços PetClinic — versão ENXUTA e com MySQL, para o TCC.
+#
+# Diferenças vs. o docker-compose.yml oficial do repo:
+#   - Removidos serviços fora do escopo da comparação: genai-service (exige
+#     chave OpenAI), grafana, prometheus, tracing-server (zipkin), admin-server.
+#   - Banco padronizado em MySQL 8.4 (decisão metodológica 3 / seção 3.4), com
+#     a MESMA configuração do monolito, em vez do HSQLDB em memória padrão.
+#   - Os serviços de dados (customers, vets, visits) compartilham o mesmo banco
+#     'petclinic', exatamente como o profile 'mysql' oficial define.
+#
+# Subir:    docker compose -f infra/docker-compose.microservices.yml up -d
+# Derrubar: docker compose -f infra/docker-compose.microservices.yml down
+# Acesso:   SEMPRE pelo api-gateway em http://localhost:8080
+
+name: petclinic-micro
+
+x-mysql-env: &mysql-env
+  SPRING_PROFILES_ACTIVE: docker,mysql
+  SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/petclinic?allowPublicKeyRetrieval=true&useSSL=false
+  SPRING_DATASOURCE_USERNAME: root
+  SPRING_DATASOURCE_PASSWORD: petclinic
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: petclinic-micro-mysql
+    command: --mysql-native-password=ON
+    environment:
+      - MYSQL_ROOT_PASSWORD=petclinic
+      - MYSQL_DATABASE=petclinic
+    ports:
+      - "3307:3306"   # 3307 no host evita conflito com o MySQL do monolito (3306)
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-ppetclinic"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  config-server:
+    image: springcommunity/spring-petclinic-config-server
+    container_name: config-server
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-I", "http://config-server:8888"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "8888:8888"
+
+  discovery-server:
+    image: springcommunity/spring-petclinic-discovery-server
+    container_name: discovery-server
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      config-server:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://discovery-server:8761"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "8761:8761"
+
+  customers-service:
+    image: springcommunity/spring-petclinic-customers-service
+    container_name: customers-service
+    environment: *mysql-env
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      mysql:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+
+  visits-service:
+    image: springcommunity/spring-petclinic-visits-service
+    container_name: visits-service
+    environment: *mysql-env
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      mysql:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
+
+  vets-service:
+    image: springcommunity/spring-petclinic-vets-service
+    container_name: vets-service
+    environment: *mysql-env
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      mysql:
+        condition: service_healthy
+      config-server:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+
+  api-gateway:
+    image: springcommunity/spring-petclinic-api-gateway
+    container_name: api-gateway
+    environment:
+      - SPRING_PROFILES_ACTIVE=docker
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    depends_on:
+      config-server:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+    ports:
+      - "8080:8080"

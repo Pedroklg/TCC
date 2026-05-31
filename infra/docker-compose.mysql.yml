@@ -1,0 +1,33 @@
+# Banco de dados COMUM às três arquiteturas (decisão metodológica 3 / seção 3.4).
+# Mesmo SGBD, mesma versão, mesma configuração — garante equivalência: eventuais
+# diferenças de desempenho não são atribuídas indevidamente ao banco.
+#
+# Subir:    docker compose -f infra/docker-compose.mysql.yml up -d
+# Derrubar: docker compose -f infra/docker-compose.mysql.yml down
+#
+# Como você testa UMA arquitetura por vez, esta mesma instância serve o monolito
+# e (depois de configurado o profile mysql) os microsserviços.
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: petclinic-mysql
+    command: --mysql-native-password=ON
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=
+      - MYSQL_ALLOW_EMPTY_PASSWORD=true
+      - MYSQL_USER=petclinic
+      - MYSQL_PASSWORD=petclinic
+      - MYSQL_DATABASE=petclinic
+    volumes:
+      - petclinic-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  petclinic-mysql-data:
