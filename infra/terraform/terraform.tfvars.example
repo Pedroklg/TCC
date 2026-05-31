@@ -1,0 +1,9 @@
+# Copie para terraform.tfvars e ajuste. NÃO versione o terraform.tfvars.
+my_ip_cidr = "SEU.IP.PUBLICO.AQUI/32"   # curl ifconfig.me  ->  acrescente /32
+key_name   = "tcc-keypair"               # par de chaves EC2 já criado no console
+
+# Opcionais (defaults razoáveis em variables.tf):
+# region                 = "us-east-1"
+# monolith_instance_type = "t3.small"
+# mysql_instance_type    = "t3.small"
+# lambda_memory_mb       = 2048

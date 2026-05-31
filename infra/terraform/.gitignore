@@ -1,0 +1,9 @@
+# Estado do Terraform — NÃO versionar (contém IP, segredos; necessário para o destroy)
+*.tfstate
+*.tfstate.*
+.terraform/
+# .terraform.lock.hcl É versionado (fixa as versões dos providers).
+# Valores reais (IP, e-mails) — versionar apenas o .example
+terraform.tfvars
+**/terraform.tfvars
+crash.log
