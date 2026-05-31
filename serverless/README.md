@@ -35,9 +35,23 @@ serverless/
 
 ## Pré-requisitos
 
-1. **Monolito instalado como biblioteca** (fornece o domínio):
+1. **Monolito instalado como biblioteca** (fornece o domínio reutilizado pelas funções).
+   Por padrão o Spring Boot gera um *fat jar* que **não** é consumível como dependência;
+   por isso, adicione um classificador ao `spring-boot-maven-plugin` em
+   `apps/monolith/pom.xml` (mantém o jar simples como artefato principal):
+   ```xml
+   <plugin>
+     <groupId>org.springframework.boot</groupId>
+     <artifactId>spring-boot-maven-plugin</artifactId>
+     <configuration>
+       <classifier>exec</classifier>
+     </configuration>
+     <!-- ...executions existentes... -->
+   </plugin>
+   ```
+   Depois instale (o executável vira `-exec.jar`; o jar simples vai para o `.m2`):
    ```powershell
-   cd apps\monolith ; .\mvnw.cmd -DskipTests install   # gera spring-petclinic-rest-4.0.2.jar no .m2
+   cd apps\monolith ; .\mvnw.cmd -DskipTests install
    ```
 2. Java 17, Docker (para `sam local`), AWS SAM CLI.
 
