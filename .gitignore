@@ -1,0 +1,27 @@
+# Repositórios oficiais do PetClinic — clonados em apps/ (ver README)
+/apps/
+
+# Resultados de execução do k6 e da análise (não versionados)
+/results/
+analysis/figures/
+analysis/tables/
+__pycache__/
+
+# Saídas de build
+**/target/
+**/*.jar
+
+# Terraform: estado (contém segredos; necessário p/ destroy) e cache
+**/.terraform/
+*.tfstate
+*.tfstate.*
+**/terraform.tfvars
+
+# Serverless: artefatos do SAM
+serverless/.aws-sam/
+samconfig.toml
+
+# Misc
+*.log
+~$*.docx
+infra/.env
