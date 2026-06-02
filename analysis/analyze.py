@@ -190,7 +190,7 @@ def timeseries(alldf):
         fig, ax = plt.subplots(figsize=(9, 5))
         for t in targets:
             d = sub[sub.target == t].copy()
-            d["sec"] = (d["time"] - d["time"].min()).dt.total_seconds().astype(int)
+            d["sec"] = d.groupby("rep")["time"].transform(lambda x: (x - x.min()).dt.total_seconds()).astype(int)
             g = d.groupby("sec")["duration_ms"].quantile(0.95)
             ax.plot(g.index, g.values, label=LABEL[t], linewidth=1.5)
         ax.set_xlabel("Tempo do teste (s)"); ax.set_ylabel("p95 do tempo de resposta (ms)")
@@ -259,10 +259,52 @@ def owner_detail_comparison(alldf):
         ax.set_xticks(x + w * (len(targets) - 1) / 2)
         ax.set_xticklabels([SCNLAB[s] for s in SCN])
         ax.set_ylabel("p95 (ms)")
-        ax.set_title("Ficha do owner (AGREGAÇÃO) — p95 por arquitetura\n(monolito em processo × microsserviços entre serviços)")
+        ax.set_title("Ficha do owner (AGREGAÇÃO owner+pets+visits) — p95 por arquitetura\n"
+                     "(resolução em processo × distribuída entre serviços/funções)")
         ax.legend(title="Arquitetura"); ax.grid(axis="y", alpha=0.3)
         fig.tight_layout(); fig.savefig(os.path.join(FIG, "bar_owner_detail_p95.png"), dpi=150); plt.close(fig)
     return sm
+
+
+def scalability(alldf):
+    """Curva de escalabilidade (throughput sob carga crescente) + ponto de saturação.
+    Usa rampa e pico. O ponto de saturação é o maior throughput sustentado com taxa de
+    erro abaixo do limiar (env SAT_ERR_THRESHOLD; padrão 2%). Reforça a hipótese H2."""
+    thr_err = float(os.environ.get("SAT_ERR_THRESHOLD", "0.02"))
+    rows = []
+    for s in ["ramp", "spike"]:
+        sub = alldf[alldf.scenario == s]
+        targets = order_targets(sub.target.unique())
+        if not targets:
+            continue
+        fig, ax = plt.subplots(figsize=(9, 5))
+        for t in targets:
+            d = sub[sub.target == t].copy()
+            reps = max(d["rep"].nunique(), 1)
+            d["sec"] = d.groupby("rep")["time"].transform(lambda x: (x - x.min()).dt.total_seconds()).astype(int)
+            g = d.groupby("sec")
+            thr = g.size() / reps  # throughput médio por segundo (entre repetições)
+            err = g["failed"].mean().reindex(thr.index).fillna(0)
+            ax.plot(thr.index, thr.values, label=LABEL[t], linewidth=1.5)
+            ok = thr[err < thr_err]
+            rows.append({
+                "target": t, "scenario": s,
+                "throughput_max_sustentavel_rps": round(float(ok.max()), 1) if len(ok) else float("nan"),
+                "throughput_pico_rps": round(float(thr.max()), 1),
+                "erro_max_pct": round(100 * float(err.max()), 2),
+            })
+        ax.set_xlabel("Tempo do teste (s) — carga ofertada crescente")
+        ax.set_ylabel("Throughput alcançado (req/s)")
+        ax.set_title(f"Escalabilidade — throughput sob carga ({SCNLAB[s]})")
+        ax.legend(title="Arquitetura")
+        ax.grid(alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(os.path.join(FIG, f"scalability_{s}.png"), dpi=150)
+        plt.close(fig)
+    sat = pd.DataFrame(rows)
+    if not sat.empty:
+        sat.to_csv(os.path.join(TAB, "saturation.csv"), index=False)
+    return sat
 
 
 def main():
@@ -278,6 +320,7 @@ def main():
     grouped_bar(summary, "throughput_rps", "Throughput (req/s)", "Throughput por arquitetura", "bar_throughput.png")
     grouped_bar(summary, "error_rate_pct", "Taxa de erro (%)", "Taxa de erro por arquitetura", "bar_error.png")
     boxplots(alldf); ecdf(alldf); timeseries(alldf)
+    sat = scalability(alldf)
     od = owner_detail_comparison(alldf)
     tests = stat_tests(alldf)
 
@@ -289,6 +332,9 @@ def main():
     if od is not None:
         print("\n=== Operação DISCRIMINANTE: ficha agregada (ownerDetail) ===")
         print(od.round(2).to_string(index=False))
+    if not sat.empty:
+        print("\n=== Escalabilidade: ponto de saturação (throughput sustentável, erro<2%) ===")
+        print(sat.to_string(index=False))
     print("\n=== Testes estatísticos ===\n" + tests)
     print(f"Figuras em {FIG}/ | Tabelas em {TAB}/")
 
