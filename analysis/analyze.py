@@ -307,6 +307,39 @@ def scalability(alldf):
     return sat
 
 
+def resource_usage():
+    """Uso de CPU/memória por arquitetura (validação da equivalência — §3.4), lido de
+    results/resources/usage.csv (gerado por cloudwatch-capture.ps1 na execução AWS).
+    Pula silenciosamente se o arquivo não existir."""
+    path = os.path.join(RESULTS, "resources", "usage.csv")
+    if not os.path.exists(path):
+        return None
+    df = pd.read_csv(path)
+    for c in ["cpu_avg_pct", "cpu_max_pct", "mem_avg_pct", "mem_max_pct"]:
+        if c not in df.columns:
+            df[c] = np.nan
+    agg = df.groupby("architecture").agg(
+        cpu_avg=("cpu_avg_pct", "mean"), cpu_max=("cpu_max_pct", "max"),
+        mem_avg=("mem_avg_pct", "mean"), mem_max=("mem_max_pct", "max"),
+    ).reset_index()
+    agg.to_csv(os.path.join(TAB, "resource_usage.csv"), index=False)
+
+    targets = [a for a in ["Monolito", "Microsserviços", "Serverless"] if a in set(agg.architecture)]
+    sub = agg[agg.architecture.isin(targets)]
+    if sub["cpu_avg"].notna().any():
+        x = np.arange(len(sub)); w = 0.38
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.bar(x - w / 2, sub["cpu_avg"], w, label="CPU")
+        if sub["mem_avg"].notna().any():
+            ax.bar(x + w / 2, sub["mem_avg"], w, label="Memória")
+        ax.set_xticks(x); ax.set_xticklabels(sub["architecture"])
+        ax.set_ylabel("Utilização média (%)")
+        ax.set_title("Uso de recursos por arquitetura (validação da equivalência)")
+        ax.legend(); ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout(); fig.savefig(os.path.join(FIG, "resource_usage.png"), dpi=150); plt.close(fig)
+    return agg
+
+
 def main():
     alldf = load_all()
     per_rep = per_rep_metrics(alldf)
@@ -321,6 +354,7 @@ def main():
     grouped_bar(summary, "error_rate_pct", "Taxa de erro (%)", "Taxa de erro por arquitetura", "bar_error.png")
     boxplots(alldf); ecdf(alldf); timeseries(alldf)
     sat = scalability(alldf)
+    res = resource_usage()
     od = owner_detail_comparison(alldf)
     tests = stat_tests(alldf)
 
@@ -335,6 +369,9 @@ def main():
     if not sat.empty:
         print("\n=== Escalabilidade: ponto de saturação (throughput sustentável, erro<2%) ===")
         print(sat.to_string(index=False))
+    if res is not None:
+        print("\n=== Uso de recursos (CPU/memória, %) por arquitetura ===")
+        print(res.round(1).to_string(index=False))
     print("\n=== Testes estatísticos ===\n" + tests)
     print(f"Figuras em {FIG}/ | Tabelas em {TAB}/")
 
