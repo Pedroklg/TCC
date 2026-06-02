@@ -11,13 +11,14 @@
 locals {
   # service => { porta, sufixo da imagem, usa MySQL?, registra no ALB? }
   micro_services = {
-    "config-server"     = { port = 8888, image = "config-server", mysql = false, alb = false }
-    "discovery-server"  = { port = 8761, image = "discovery-server", mysql = false, alb = false }
-    "customers-service" = { port = 8081, image = "customers-service", mysql = true, alb = false }
-    "vets-service"      = { port = 8083, image = "vets-service", mysql = true, alb = false }
-    "visits-service"    = { port = 8082, image = "visits-service", mysql = true, alb = false }
-    "api-gateway"       = { port = 8080, image = "api-gateway", mysql = false, alb = true }
+    "config-server"     = { port = 8888, image = "config-server", mysql = false, alb = false, cpu = 256, memory = 512 }
+    "discovery-server"  = { port = 8761, image = "discovery-server", mysql = false, alb = false, cpu = 256, memory = 512 }
+    "customers-service" = { port = 8081, image = "customers-service", mysql = true, alb = false, cpu = 512, memory = 1024 }
+    "vets-service"      = { port = 8083, image = "vets-service", mysql = true, alb = false, cpu = 256, memory = 512 }
+    "visits-service"    = { port = 8082, image = "visits-service", mysql = true, alb = false, cpu = 256, memory = 512 }
+    "api-gateway"       = { port = 8080, image = "api-gateway", mysql = false, alb = true, cpu = 512, memory = 1024 }
   }
+  # Soma: 2.048 unidades de CPU (2 vCPU) e 4.096 MB (4 GB) — equivalente ao monolito (c5.large).
 }
 
 resource "aws_cloudwatch_log_group" "micro" {
@@ -61,8 +62,8 @@ resource "aws_ecs_task_definition" "svc" {
   family                   = "${var.prefix}-${each.key}"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = var.fargate_cpu
-  memory                   = var.fargate_memory
+  cpu                      = each.value.cpu
+  memory                   = each.value.memory
   execution_role_arn       = aws_iam_role.ecs_exec.arn
 
   container_definitions = jsonencode([{

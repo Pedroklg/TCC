@@ -46,25 +46,21 @@ variable "db_password" {
 }
 
 # --- Dimensionamento (equivalência de recursos — Quadro 2) ---
+# Instâncias de DESEMPENHO FIXO (não burstable) — evitam throttling de CPU por
+# esgotamento de créditos sob carga sustentada (ameaça à validade interna).
 variable "mysql_instance_type" {
   type    = string
-  default = "t3.small"
+  default = "m5.large" # 2 vCPU / 8 GB — folgado para o banco não virar gargalo
 }
 variable "monolith_instance_type" {
   type    = string
-  default = "t3.small"
+  default = "c5.large" # 2 vCPU / 4 GB — base da equivalência (= soma das tarefas Fargate)
 }
-variable "fargate_cpu" {
-  type    = number
-  default = 256 # 0,25 vCPU por serviço
-}
-variable "fargate_memory" {
-  type    = number
-  default = 512 # 0,5 GB por serviço
-}
+# A CPU/memória de cada tarefa Fargate é definida POR SERVIÇO em microservices.tf,
+# somando 2 vCPU / 4 GB no total — equivalente ao monolito.
 variable "lambda_memory_mb" {
   type    = number
-  default = 2048
+  default = 1769 # ≈ 1 vCPU por invocação (no Lambda a CPU é proporcional à memória)
 }
 
 # --- Artefatos locais (Terraform sobe no S3) ---
