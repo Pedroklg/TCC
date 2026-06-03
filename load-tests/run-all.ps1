@@ -31,7 +31,7 @@ if ($BaseUrl) { $envArgs += @('-e', "BASE_URL=$BaseUrl") }
 
 # Overrides de carga por cenário. No modo -Quick reduzimos tudo só para validar
 # que o pipeline de coleta funciona; os valores definitivos ficam nos defaults
-# dos próprios scripts (constante 5m/50VU, rampa 200VU, pico 400VU).
+# dos próprios scripts (constante 5m/50 VUs, rampa até 200 VUs, pico 20->300 iter/s — modelo aberto).
 # O pico é modelo aberto (taxa de chegada), sem think time.
 $overrides = @{ constant = @(); ramp = @(); spike = @('-e', 'THINK_MIN=0', '-e', 'THINK_MAX=0') }
 if ($Quick) {
