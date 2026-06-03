@@ -1,6 +1,6 @@
 """
 Modelo de custo das três arquiteturas na AWS (us-east-1), em função do volume de
-requisições mensal. Avalia a hipótese H4: custos de EC2/Fargate são por TEMPO
+requisições mensal. Premissa: os custos de EC2/Fargate são por TEMPO
 (independem da carga) e o de Lambda é por USO — logo, a arquitetura mais econômica
 depende do perfil de tráfego. Identifica o ponto de equilíbrio (break-even).
 
