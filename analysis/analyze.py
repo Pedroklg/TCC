@@ -201,7 +201,7 @@ def timeseries(alldf):
 
 def stat_tests(per_rep, metric="median_ms"):
     """Compara as arquiteturas usando a MÉTRICA-RESUMO POR REPETIÇÃO (§3.6: a unidade
-    amostral é a repetição, n≈50 por grupo — não as requisições individuais).
+    amostral é a repetição, n≈10 por grupo — não as requisições individuais).
     Verifica a normalidade com Shapiro-Wilk (por grupo) ANTES do teste não-paramétrico
     (Kruskal-Wallis global + Mann-Whitney par a par com correção de Bonferroni)."""
     lines = ["Comparação entre arquiteturas — tempo de resposta (mediana por repetição)",

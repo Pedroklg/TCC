@@ -11,7 +11,7 @@ param(
   [ValidateSet('mono', 'micro', 'serverless')]
   [string]$Target = 'mono',
   [string]$BaseUrl = '',
-  [int]$Reps = 50,  # repetições por cenário (§3.6 — 50 execuções; amostra representativa)
+  [int]$Reps = 10,  # repetições por cenário (§3.6 — 10 execuções; amostra representativa)
   [string]$Label = '',  # nome da pasta de resultados (default = Target); use p/ subcenários
                         # serverless: 'serverless-cold' e 'serverless-snap'
   [switch]$Quick,  # durações/VUs reduzidos só para validar o pipeline de coleta
