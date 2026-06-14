@@ -5,7 +5,7 @@ Lê os arquivos results/<alvo>/<timestamp>/<cenario>[-repNN]-raw.json, monta uma
 tabela por requisição e produz:
   - tables/per_rep.csv ......... métricas por repetição (base do tratamento estatístico)
   - tables/summary.csv ......... média ± IC95% por (arquitetura, cenário)
-  - tables/stats_tests.txt ..... Kruskal-Wallis + Mann-Whitney (comparação entre arquiteturas)
+  - tables/stats_tests.txt ..... Shapiro-Wilk + Kruskal-Wallis + Mann-Whitney (unidade: repetição)
   - figures/*.png .............. gráficos comparativos
 
 Uso:
@@ -199,18 +199,31 @@ def timeseries(alldf):
         fig.tight_layout(); fig.savefig(os.path.join(FIG, f"timeseries_{s}.png"), dpi=150); plt.close(fig)
 
 
-def stat_tests(alldf):
-    """Compara o tempo de resposta entre arquiteturas (não-paramétrico)."""
-    lines = ["Comparação do tempo de resposta entre arquiteturas",
-             "(Kruskal-Wallis global + Mann-Whitney par a par, Bonferroni)\n"]
+def stat_tests(per_rep, metric="median_ms"):
+    """Compara as arquiteturas usando a MÉTRICA-RESUMO POR REPETIÇÃO (§3.6: a unidade
+    amostral é a repetição, n≈50 por grupo — não as requisições individuais).
+    Verifica a normalidade com Shapiro-Wilk (por grupo) ANTES do teste não-paramétrico
+    (Kruskal-Wallis global + Mann-Whitney par a par com correção de Bonferroni)."""
+    lines = ["Comparação entre arquiteturas — tempo de resposta (mediana por repetição)",
+             "Unidade amostral: repetição (métrica-resumo por execução), conforme a seção 3.6.",
+             "Normalidade: Shapiro-Wilk por grupo | Comparação: Kruskal-Wallis + Mann-Whitney (Bonferroni)\n"]
     for s in SCN:
-        sub = alldf[alldf.scenario == s]
+        sub = per_rep[per_rep.scenario == s]
         targets = order_targets(sub.target.unique())
         if len(targets) < 2:
             continue
-        groups = [sub[sub.target == t]["duration_ms"].to_numpy() for t in targets]
+        groups = [sub[sub.target == t][metric].dropna().to_numpy() for t in targets]
+        lines.append(f"[{SCNLAB[s]}]")
+        lines.append("  Normalidade (Shapiro-Wilk):")
+        for t, x in zip(targets, groups):
+            if len(x) >= 3:
+                W, pw = stats.shapiro(x)
+                lines.append(f"    {LABEL[t]} (n={len(x)}): W={W:.3f}, p={pw:.2e} "
+                             f"({'normal' if pw >= 0.05 else 'não-normal'} a 5%)")
+            else:
+                lines.append(f"    {LABEL[t]} (n={len(x)}): amostra insuficiente para Shapiro-Wilk")
         H, p = stats.kruskal(*groups)
-        lines.append(f"[{SCNLAB[s]}] Kruskal-Wallis: H={H:.2f}, p={p:.2e} "
+        lines.append(f"  Kruskal-Wallis: H={H:.2f}, p={p:.2e} "
                      f"({'diferença significativa' if p < 0.05 else 'sem diferença'})")
         pairs = [(i, j) for i in range(len(targets)) for j in range(i + 1, len(targets))]
         nb = max(len(pairs), 1)
@@ -218,7 +231,7 @@ def stat_tests(alldf):
             U, pu = stats.mannwhitneyu(groups[i], groups[j], alternative="two-sided")
             med_i, med_j = np.median(groups[i]), np.median(groups[j])
             lines.append(f"    {LABEL[targets[i]]} vs {LABEL[targets[j]]}: "
-                         f"p={min(pu*nb,1):.2e} (Bonferroni) | medianas "
+                         f"p={min(pu*nb,1):.2e} (Bonferroni) | medianas das repetições "
                          f"{med_i:.1f} vs {med_j:.1f} ms")
         lines.append("")
     txt = "\n".join(lines)
@@ -356,7 +369,7 @@ def main():
     sat = scalability(alldf)
     res = resource_usage()
     od = owner_detail_comparison(alldf)
-    tests = stat_tests(alldf)
+    tests = stat_tests(per_rep)
 
     pd.set_option("display.width", 160, "display.max_columns", 30)
     show = summary[["target", "scenario", "reps", "throughput_rps_mean",

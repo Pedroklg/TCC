@@ -11,7 +11,7 @@ param(
   [ValidateSet('mono', 'micro', 'serverless')]
   [string]$Target = 'mono',
   [string]$BaseUrl = '',
-  [int]$Reps = 1,  # repetições por cenário (seção 3.6 — tratamento estatístico)
+  [int]$Reps = 50,  # repetições por cenário (§3.6 — 50 execuções; amostra representativa)
   [string]$Label = '',  # nome da pasta de resultados (default = Target); use p/ subcenários
                         # serverless: 'serverless-cold' e 'serverless-snap'
   [switch]$Quick,  # durações/VUs reduzidos só para validar o pipeline de coleta
@@ -35,6 +35,7 @@ if ($BaseUrl) { $envArgs += @('-e', "BASE_URL=$BaseUrl") }
 # O pico é modelo aberto (taxa de chegada), sem think time.
 $overrides = @{ constant = @(); ramp = @(); spike = @('-e', 'THINK_MIN=0', '-e', 'THINK_MAX=0') }
 if ($Quick) {
+  if (-not $PSBoundParameters.ContainsKey('Reps')) { $Reps = 2 }  # validação: poucas repetições
   $overrides.constant = @('-e', 'VUS=10', '-e', 'DURATION=30s')
   $overrides.ramp     = @('-e', 'MAX_VUS=30', '-e', 'RAMP_UP=15s', '-e', 'HOLD=15s', '-e', 'RAMP_DOWN=10s')
   $overrides.spike   += @('-e', 'BASE_RATE=10', '-e', 'PEAK_RATE=60', '-e', 'PREALLOC_VUS=50', '-e', 'MAX_VUS=200',
@@ -74,11 +75,19 @@ foreach ($s in $scenarios) {
     }
     $summary = Join-Path $outDir "$s-$tag-summary.json"
     $raw = Join-Path $outDir "$s-$tag-raw.json"
+    # k6 emite avisos (ex.: "Insufficient VUs") em stderr; no PowerShell 5.1 isso vira
+    # NativeCommandError e, com $ErrorActionPreference='Stop', abortaria a bateria inteira.
+    # Avisos não são falha: rodamos com EAP='Continue' e checamos só o código de saída.
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     k6 run @envArgs @($overrides[$s]) `
       --summary-trend-stats "avg,min,med,max,p(90),p(95),p(99)" `
       --summary-export $summary `
       --out "json=$raw" `
       (Join-Path $PSScriptRoot "scenario-$s.js")
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    if ($code -ne 0) { Write-Warning "k6 saiu com código $code em $s/$tag (limiar não atendido?); seguindo." }
   }
 }
 
