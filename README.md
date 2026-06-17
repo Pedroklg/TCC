@@ -13,10 +13,10 @@ carga com **Grafana k6**.
 
 ## As três arquiteturas
 
-| Arquitetura | Implementação | Plataforma AWS (Terraform) |
-|---|---|---|
-| **Monolito** | `spring-petclinic-rest` oficial (JAR único) | EC2 |
-| **Microsserviços** | `spring-petclinic-microservices` oficial (serviços decompostos) | ECS Fargate + Service Connect |
+| Arquitetura           | Implementação                                                                                | Plataforma AWS (Terraform)                                   |
+| --------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| **Monolito**          | `spring-petclinic-rest` oficial (JAR único)                                                  | EC2                                                          |
+| **Microsserviços**    | `spring-petclinic-microservices` oficial (serviços decompostos)                              | ECS Fargate + Service Connect                                |
 | **Serverless (FaaS)** | domínio refatorado em funções via **spring-cloud-function** (ver [serverless/](serverless/)) | Lambda + API Gateway (2 subcenários: cold start × SnapStart) |
 
 Stack: Java 17, Spring Boot 4.0.6, MySQL 8.4. Serverless: spring-cloud-function 5.0.x.
@@ -25,6 +25,7 @@ Stack: Java 17, Spring Boot 4.0.6, MySQL 8.4. Serverless: spring-cloud-function 
 
 ```
 .
+├── run-aws-experiment.ps1   # roda o experimento na AWS por arquitetura (apply → k6 → captura → destroy)
 ├── serverless/        # app FaaS (spring-cloud-function) — reúsa o domínio do monolito
 ├── load-tests/        # cenários k6 (constante, rampa, pico) + workload + runner
 ├── analysis/          # análise das métricas (Python) + cold start
@@ -47,12 +48,14 @@ Stack: Java 17, Spring Boot 4.0.6, MySQL 8.4. Serverless: spring-cloud-function 
 ## Setup local
 
 ### 1. Clonar os benchmarks oficiais
+
 ```bash
 git clone https://github.com/spring-petclinic/spring-petclinic-rest.git           apps/monolith
 git clone https://github.com/spring-petclinic/spring-petclinic-microservices.git  apps/microservices
 ```
 
 ### 2. Banco + monolito
+
 ```powershell
 docker compose -f infra/docker-compose.mysql.yml up -d
 cd apps/monolith ; .\mvnw.cmd spring-boot:run "-Dspring-boot.run.profiles=mysql,spring-data-jpa"
@@ -60,13 +63,16 @@ cd apps/monolith ; .\mvnw.cmd spring-boot:run "-Dspring-boot.run.profiles=mysql,
 ```
 
 ### 3. Microsserviços
+
 ```powershell
 docker compose -f infra/docker-compose.microservices.yml up -d
 # valida pelo gateway: curl http://localhost:8080/api/customer/owners
 ```
 
 ### 4. Serverless (FaaS)
+
 Reúsa o domínio do monolito como biblioteca — ver [serverless/README.md](serverless/README.md):
+
 ```powershell
 cd apps/monolith ; .\mvnw.cmd -DskipTests install   # publica o domínio no .m2
 cd ../../serverless ; .\mvnw.cmd -DskipTests package # gera o uber-jar do Lambda
@@ -74,6 +80,7 @@ sam local start-api                                  # valida via API Gateway lo
 ```
 
 ## Testes de carga e análise
+
 ```powershell
 # bateria nos 3 cenários (constante, rampa, pico), com repetições
 .\load-tests\run-all.ps1 -Target mono  -Reps 10 -ResetBetweenReps
@@ -83,19 +90,41 @@ sam local start-api                                  # valida via API Gateway lo
 python analysis/analyze.py
 python analysis/coldstart.py
 ```
+
 Detalhes em [load-tests/README.md](load-tests/README.md) e [analysis/README.md](analysis/README.md).
 
 ## Provisionamento na AWS
+
 A infraestrutura das três arquiteturas (recursos, pré-requisitos, ordem de aplicação,
-custos e *teardown*) está em [infra/terraform/](infra/terraform/) — ver o seu README.
+custos e _teardown_) está em [infra/terraform/](infra/terraform/) — ver o seu README.
 **O AWS Budget é sempre o primeiro recurso**, e a infraestrutura deve ser derrubada
 (`terraform destroy`) após cada janela de medição.
 
+### Rodar o experimento de ponta a ponta
+
+[run-aws-experiment.ps1](run-aws-experiment.ps1) orquestra o ciclo completo **uma
+arquitetura por vez**: `terraform apply` (só daquele braço) → espera o app responder →
+bateria k6 → captura de métricas (CloudWatch / cold start) → **`terraform destroy`**.
+O teardown roda no `finally` — derruba a infra mesmo se o k6 falhar ou travar (há um
+_watchdog_ de tempo).
+
+```powershell
+.\run-aws-experiment.ps1 -Quick            # ensaio: sobe, roda pouco, captura e DESTRÓI
+.\run-aws-experiment.ps1 -Only mono,micro  # rodada real de braços específicos
+.\run-aws-experiment.ps1                    # tudo, 10 repetições por cenário
+```
+
+Requer `aws configure` feito, `infra/terraform/terraform.tfvars` preenchido e o **Budget**
+já aplicado. Não cobre queda de energia / suspensão do computador — antes de rodar sem
+supervisão: `powercfg /change standby-timeout-ac 0`.
+
 ## Métricas coletadas
+
 Tempo de resposta (média, p95, p99), throughput (req/s) e taxa de erro (%). Para a
 serverless, também tempo de inicialização **cold start × warm start** nos dois
 subcenários (sem otimização × SnapStart).
 
 ## Licença
+
 Distribuído sob a **Apache License 2.0** — ver [LICENSE](LICENSE) e [NOTICE](NOTICE).
 Baseia-se no [Spring PetClinic](https://github.com/spring-petclinic), também Apache-2.0.

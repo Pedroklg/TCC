@@ -24,7 +24,7 @@
   Antes de rodar sem supervisão: powercfg /change standby-timeout-ac 0
 
 .EXAMPLE
-  # Ensaio rápido do pipeline inteiro (sobe, roda pouco, captura, DESTRÓI) — centavos:
+  # Ensaio rápido do pipeline inteiro (sobe, roda pouco, captura, DESTRÓI):
   .\run-aws-experiment.ps1 -Quick
 
 .EXAMPLE
