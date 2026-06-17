@@ -54,7 +54,7 @@ URLs padrão já apontam para as portas certas; na AWS, passe `BASE_URL`.
 
 ```powershell
 # Bateria completa (3 cenários) — definitiva
-.\load-tests\run-all.ps1 -Target mono -Reps 7 -ResetBetweenReps
+.\load-tests\run-all.ps1 -Target mono -Reps 10 -ResetBetweenReps
 
 # Validação rápida do pipeline (~1,5 min)
 .\load-tests\run-all.ps1 -Target mono -Quick

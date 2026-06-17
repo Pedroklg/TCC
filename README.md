@@ -76,8 +76,8 @@ sam local start-api                                  # valida via API Gateway lo
 ## Testes de carga e análise
 ```powershell
 # bateria nos 3 cenários (constante, rampa, pico), com repetições
-.\load-tests\run-all.ps1 -Target mono  -Reps 7 -ResetBetweenReps
-.\load-tests\run-all.ps1 -Target micro -Reps 7 -ResetBetweenReps
+.\load-tests\run-all.ps1 -Target mono  -Reps 10 -ResetBetweenReps
+.\load-tests\run-all.ps1 -Target micro -Reps 10 -ResetBetweenReps
 
 # análise (gera tabelas e gráficos comparativos + cold start)
 python analysis/analyze.py

@@ -1,4 +1,4 @@
 # Copie para terraform.tfvars e ajuste. NÃO versione o terraform.tfvars.
-alert_emails  = ["klgarpema@gmail.com"]
+alert_emails  = ["seu-email@exemplo.com"]
 budget_amount = 20
 # alert_thresholds_pct = [25, 50, 100]  # = US$5/10/20
