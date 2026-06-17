@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-  Fase 7 — orquestra "instanciar => rodar => destruir" na AWS, uma arquitetura por vez.
+  Orquestra "instanciar => rodar => destruir" na AWS, uma arquitetura por vez.
 
 .DESCRIPTION
   Para cada braço (mono, micro, serverless) o script:

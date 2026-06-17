@@ -10,7 +10,7 @@ Entrada: CSV com colunas
   invocation   -> cold | warm
   init_ms      -> Init Duration (só faz sentido no cold; 0/vazio no warm)
   duration_ms  -> duração do handler / tempo de resposta
-Na AWS (Fase 7), esses valores saem da linha REPORT do CloudWatch Logs
+Na AWS, esses valores saem da linha REPORT do CloudWatch Logs
 (campos "Init Duration" e "Duration"); aqui o mesmo formato é reaproveitado.
 
 Uso:

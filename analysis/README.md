@@ -49,7 +49,7 @@ Como o k6 roda localmente e as apps na AWS, os valores **absolutos** incluem a
 latência do enlace (registrada em `baseline-latency.txt`). A comparação é
 **relativa** entre arquiteturas — desconte/mencione a base ao interpretar.
 
-## Fase 7 — cold start
+## Cold start (medição na AWS)
 
 Quando houver dados de cold/warm start, acrescentar um gráfico dedicado
 (barras/box do *Init Duration*: cold puro × SnapStart × warm).

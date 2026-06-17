@@ -3,7 +3,7 @@
 # ECS Service Connect (mantém os hostnames config-server/discovery-server), ALB
 # expõe o api-gateway. Imagens públicas oficiais (springcommunity/*).
 #
-# ⚠️ Braço mais complexo — validar no `terraform plan/apply` (Fase 7). Pontos de
+# ⚠️ Braço mais complexo — validar no `terraform plan/apply` na AWS. Pontos de
 #    atenção anotados: ordem de subida (config/discovery primeiro; os apps fazem
 #    retry), health check do gateway, e a config do Service Connect.
 # =============================================================================

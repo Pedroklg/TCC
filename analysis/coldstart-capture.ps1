@@ -1,4 +1,4 @@
-# Captura cold start × warm start de um subcenário serverless na AWS (Fase 7).
+# Captura cold start × warm start de um subcenário serverless na AWS.
 # Induz cold starts de forma controlada, invoca, e extrai do CloudWatch Logs as
 # linhas REPORT (Init Duration p/ sem-otim, Restore Duration p/ SnapStart, e Duration).
 # Saída no formato esperado por coldstart.py:

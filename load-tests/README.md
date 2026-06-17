@@ -93,4 +93,4 @@ k6 run -e TARGET=mono -e VUS=50 -e DURATION=5m load-tests/scenario-constant.js
 
 O cold start não é medido por estes cenários genéricos: ele exige indução
 controlada de novos ambientes de execução (seção 3.6). Isso será tratado em um
-script dedicado quando a função Lambda estiver no ar (Fase 6 do setup).
+script dedicado quando a função Lambda estiver no ar na AWS.

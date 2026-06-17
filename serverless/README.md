@@ -80,7 +80,7 @@ curl http://127.0.0.1:3000/api/owners
 > ⚠️ **Cold start na emulação do SAM é lentíssimo (~150–200 s no Windows)**; é
 > artefato da emulação. No Lambda real fica na casa de ~10–15 s. Chamada **quente
 > ~1,3 s**. Por isso o `sam local` serve para validação **funcional** (curl), não
-> para carga k6 — o k6 de serverless roda na **AWS** (Fase 7).
+> para carga k6 — o k6 de serverless roda na **AWS**.
 
 ## Notas técnicas (Spring Boot 4 é recente — armadilhas tratadas)
 
@@ -95,11 +95,11 @@ curl http://127.0.0.1:3000/api/owners
 ## Cold start × warm start (objeto de estudo)
 
 O contraste cold (~150–200 s emulação / ~10–15 s no Lambda) × warm (~1,3 s) é
-exatamente o fenômeno avaliado. Na AWS (Fase 7) a serverless é medida em **dois
+exatamente o fenômeno avaliado. Na AWS, a serverless é medida em **dois
 subcenários**: (a) sem otimização e (b) com **SnapStart** (compatível: zip + runtime
 gerenciado java17).
 
-## Deploy na AWS — só na Fase 7 (após o Budget)
+## Deploy na AWS (após o Budget)
 
 - O uber-jar (~172 MB) excede o limite de upload direto do Lambda → vai por **S3**
   (`sam deploy` resolve com `--resolve-s3`).
