@@ -43,7 +43,9 @@
 param(
   [ValidateSet('mono', 'micro', 'serverless')]
   [string[]]$Only = @('mono', 'micro', 'serverless'),
-  [int]$Reps = 10,                 # repetições por cenário (§3.6)
+  [int]$Reps = 10,                 # repetições por cenário (§3.7)
+  [string]$DbSshKey = '',          # chave .pem do key pair -> reset do MySQL ao seed entre
+                                   # repetições (mono/micro, §3.7). Sem ela: SEM reset (avisa).
   [switch]$Quick,                  # ensaio: poucas reps + timeouts curtos (valida o pipeline)
   [switch]$SkipCaptures,           # pula CloudWatch/cold start (só k6 + teardown)
   [switch]$SkipBudgetCheck,        # não exige o 00-budget aplicado (use com consciência)
@@ -68,6 +70,9 @@ $ColdCapture = Join-Path $RepoRoot 'analysis\coldstart-capture.ps1'
 if ($Quick) {
   if (-not $PSBoundParameters.ContainsKey('BatteryTimeoutMin')) { $BatteryTimeoutMin = 15 }
   if (-not $PSBoundParameters.ContainsKey('ColdReps')) { $ColdReps = 3 }
+  # Invoke-Battery sempre passa -Reps, o que anula o default de -Quick no
+  # run-all.ps1; reduzir aqui, senão o ensaio estoura o watchdog.
+  if (-not $PSBoundParameters.ContainsKey('Reps')) { $Reps = 2 }
 }
 
 # Ordem canônica + config de cada braço.
@@ -75,9 +80,19 @@ if ($Quick) {
 #             ORFÃS no grafo (nada depende delas), então precisam vir explícitas,
 #             senão o app sobe mas não alcança o MySQL.
 # batteries = uma ou mais baterias k6 (serverless tem cold e snap).
+
+# Como as regras de SG, estes recursos são órfãos no grafo e o -target não os
+# alcança: rota de saída (user-data sem internet), política da role das EC2 (403
+# ao baixar do S3) e política do agente CloudWatch (métrica de memória, §3.5).
+$CommonTargets = @(
+  'aws_route_table_association.public',
+  'aws_iam_role_policy.ec2_s3',
+  'aws_iam_role_policy_attachment.cw_agent'
+)
+
 $ArchConfig = [ordered]@{
   mono       = @{
-    targets   = @(
+    targets   = $CommonTargets + @(
       'aws_instance.monolith',
       'aws_security_group_rule.mysql_from_mono',
       'aws_security_group_rule.mysql_ssh'
@@ -87,8 +102,9 @@ $ArchConfig = [ordered]@{
     )
   }
   micro      = @{
-    targets   = @(
+    targets   = $CommonTargets + @(
       'aws_ecs_service.svc',
+      'aws_iam_role_policy_attachment.ecs_exec', # órfão: sem ele o Fargate não puxa imagem/logs
       'aws_lb_listener.gateway',
       'aws_security_group_rule.mysql_from_micro',
       'aws_security_group_rule.micro_self',
@@ -99,8 +115,9 @@ $ArchConfig = [ordered]@{
     )
   }
   serverless = @{
-    targets   = @(
+    targets   = $CommonTargets + @(
       'aws_apigatewayv2_route.fn',
+      'aws_iam_role_policy_attachment.lambda_vpc', # órfão: sem ele a Lambda não cria ENI na VPC
       'aws_apigatewayv2_stage.default',
       'aws_lambda_permission.apigw',
       'aws_security_group_rule.mysql_from_lambda',
@@ -144,10 +161,12 @@ function Wait-Health {
 }
 
 function Invoke-Battery {
-  param([string]$Target, [string]$BaseUrl, [string]$Label, [int]$Reps, [switch]$Quick, [int]$TimeoutMin)
+  param([string]$Target, [string]$BaseUrl, [string]$Label, [int]$Reps, [switch]$Quick, [int]$TimeoutMin,
+    [string]$DbHost = '', [string]$DbKey = '')
   $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $RunAll,
     '-Target', $Target, '-BaseUrl', $BaseUrl, '-Label', $Label, '-Reps', $Reps)
   if ($Quick) { $a += '-Quick' }
+  if ($DbHost) { $a += @('-ResetBetweenReps', '-DbSshHost', $DbHost, '-DbSshKey', $DbKey) }
   Write-Host "  bateria '$Label' ($Reps reps) -> $BaseUrl" -ForegroundColor Cyan
   # Start-Process p/ ter o WATCHDOG (WaitForExit com timeout). -NoNewWindow herda o
   # console, então o output do k6 continua aparecendo ao vivo.
@@ -156,7 +175,7 @@ function Invoke-Battery {
     try { $p.Kill() } catch { }
     throw "WATCHDOG: bateria '$Label' passou de $TimeoutMin min - abortando (o finally vai destruir)"
   }
-  # run-all tolera limiar k6 nao atendido e sai 0; !=0 e' anomalia, mas nao aborta a sessao.
+  # run-all tolera limiar k6 não atendido e sai 0; !=0 é anomalia, mas não aborta a sessão.
   if ($p.ExitCode -ne 0) { Write-Warning "run-all saiu com codigo $($p.ExitCode) em '$Label'; seguindo." }
 }
 
@@ -210,7 +229,7 @@ function Invoke-Capture {
     }
   }
   catch {
-    # Captura nao e' critica: avisa e segue (NAO impede o teardown).
+    # Captura não é crítica: avisa e segue, sem impedir o teardown.
     Write-Warning "captura de metricas ($Arch) falhou: $($_.Exception.Message)"
   }
 }
@@ -235,6 +254,14 @@ function Test-Preflight {
       "(ou -SkipBudgetCheck se ja garantiu o alerta de custo por fora.)"
     }
   }
+  # Conta nova não tem a service-linked role do ECS e o CreateCluster falha.
+  & aws iam get-role --role-name AWSServiceRoleForECS *> $null
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "  criando service-linked role do ECS..." -ForegroundColor DarkCyan
+    & aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com *> $null
+    Start-Sleep -Seconds 10  # a role leva alguns segundos ate ficar utilizavel
+  }
+
   Write-Host "Preflight OK." -ForegroundColor Green
 }
 
@@ -266,11 +293,19 @@ try {
       Invoke-Terraform $targs
 
       # 2..3. baterias (com health-gate antes de cada uma)
+      # Reset do banco ao seed entre repetições (§3.7, só arquiteturas contínuas):
+      # requer a chave SSH do key pair; sem ela, roda SEM reset e avisa.
+      $dbIp = ''
+      if ($arch -in @('mono', 'micro')) {
+        if ($DbSshKey) { $dbIp = Get-TfOutput 'mysql_public_ip' }
+        else { Write-Warning "sem -DbSshKey: reset do MySQL entre repetições DESABILITADO (a metodologia, §3.7, prevê o reset)" }
+      }
       $winStart = Get-Date
       foreach ($b in $cfg.batteries) {
         $base = Get-TfOutput $b.UrlOutput
         Wait-Health -Url ($base + $b.HealthPath) -TimeoutMin $HealthTimeoutMin
-        Invoke-Battery -Target $b.Target -BaseUrl $base -Label $b.Label -Reps $Reps -Quick:$Quick -TimeoutMin $bTimeout
+        Invoke-Battery -Target $b.Target -BaseUrl $base -Label $b.Label -Reps $Reps -Quick:$Quick -TimeoutMin $bTimeout `
+          -DbHost $dbIp -DbKey $DbSshKey
       }
       $winEnd = Get-Date
 

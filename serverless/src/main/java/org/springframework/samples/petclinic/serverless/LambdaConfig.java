@@ -130,7 +130,9 @@ public class LambdaConfig {
     private APIGatewayProxyResponseEvent json(int status, Object body) {
         APIGatewayProxyResponseEvent res = new APIGatewayProxyResponseEvent()
             .withStatusCode(status)
-            .withHeaders(Map.of("Content-Type", "application/json"));
+            .withHeaders(Map.of("Content-Type", "application/json"))
+            // Obrigatório: nulo faz o API Gateway rejeitar a resposta (HTTP 500).
+            .withIsBase64Encoded(false);
         try {
             return res.withBody(objectMapper.writeValueAsString(body));
         } catch (JacksonException e) {

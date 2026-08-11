@@ -28,3 +28,8 @@ docs/fase7-aws.md
 *.log
 ~$*.docx
 infra/.env
+
+docs/tcc/*
+
+# Monografia LaTeX — versionada em repositório PRIVADO separado (não publicar no repo aberto)
+/latex/

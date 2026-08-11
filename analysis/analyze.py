@@ -35,11 +35,11 @@ SCNLAB = {"constant": "Constante", "ramp": "Rampa", "spike": "Pico"}
 TARGET_ORDER = ["mono", "micro", "serverless", "serverless-cold", "serverless-snap"]
 METRICS = ["throughput_rps", "error_rate_pct", "mean_ms", "median_ms", "p95_ms", "p99_ms"]
 
-# Descarte de aquecimento (seção 3.6): no cenário de carga CONSTANTE, ignora os
-# primeiros WARMUP_SEC segundos para medir o regime estável, livre de efeitos
-# transitórios (JIT da JVM, preenchimento de cache). Em rampa/pico NÃO se descarta
-# (os transitórios são o objeto de estudo). Defina via env WARMUP_SEC.
-WARMUP_SEC = int(os.environ.get("WARMUP_SEC", "0"))
+# Descarte de aquecimento (§3.7): só no cenário constante e só em mono/micro, para
+# excluir JIT e cache. No serverless o cold start é a medição de interesse, e em
+# rampa/pico os transitórios são o objeto de estudo. Use 0 em runs -Quick.
+WARMUP_SEC = int(os.environ.get("WARMUP_SEC", "60"))
+WARMUP_TARGETS = ("mono", "micro")
 
 
 def parse_raw(path):
@@ -94,7 +94,7 @@ def order_targets(ts):
 def per_rep_metrics(alldf):
     rows = []
     for (t, s, rep), g in alldf.groupby(["target", "scenario", "rep"]):
-        if s == "constant" and WARMUP_SEC > 0:
+        if s == "constant" and WARMUP_SEC > 0 and t in WARMUP_TARGETS:
             cut = g["time"].min() + pd.Timedelta(seconds=WARMUP_SEC)
             g = g[g["time"] >= cut]
             if g.empty:
@@ -200,12 +200,12 @@ def timeseries(alldf):
 
 
 def stat_tests(per_rep, metric="median_ms"):
-    """Compara as arquiteturas usando a MÉTRICA-RESUMO POR REPETIÇÃO (§3.6: a unidade
+    """Compara as arquiteturas usando a MÉTRICA-RESUMO POR REPETIÇÃO (§3.7: a unidade
     amostral é a repetição, n≈10 por grupo — não as requisições individuais).
     Verifica a normalidade com Shapiro-Wilk (por grupo) ANTES do teste não-paramétrico
     (Kruskal-Wallis global + Mann-Whitney par a par com correção de Bonferroni)."""
     lines = ["Comparação entre arquiteturas — tempo de resposta (mediana por repetição)",
-             "Unidade amostral: repetição (métrica-resumo por execução), conforme a seção 3.6.",
+             "Unidade amostral: repetição (métrica-resumo por execução), conforme a seção 3.7.",
              "Normalidade: Shapiro-Wilk por grupo | Comparação: Kruskal-Wallis + Mann-Whitney (Bonferroni)\n"]
     for s in SCN:
         sub = per_rep[per_rep.scenario == s]
@@ -282,7 +282,7 @@ def owner_detail_comparison(alldf):
 def scalability(alldf):
     """Curva de escalabilidade (throughput sob carga crescente) + ponto de saturação.
     Usa rampa e pico. O ponto de saturação é o maior throughput sustentado com taxa de
-    erro abaixo do limiar (env SAT_ERR_THRESHOLD; padrão 2%). Reforça a hipótese H2."""
+    erro abaixo do limiar (env SAT_ERR_THRESHOLD; padrão 2%), conforme a seção 3.7."""
     thr_err = float(os.environ.get("SAT_ERR_THRESHOLD", "0.02"))
     rows = []
     for s in ["ramp", "spike"]:
@@ -322,12 +322,13 @@ def scalability(alldf):
 
 def resource_usage():
     """Uso de CPU/memória por arquitetura (validação da equivalência — §3.4), lido de
-    results/resources/usage.csv (gerado por cloudwatch-capture.ps1 na execução AWS).
-    Pula silenciosamente se o arquivo não existir."""
-    path = os.path.join(RESULTS, "resources", "usage.csv")
-    if not os.path.exists(path):
+    results/resources/usage*.csv (gerados por cloudwatch-capture.ps1 na execução AWS;
+    o orquestrador grava um arquivo por braço: usage-mono/micro/serverless.csv).
+    Pula silenciosamente se nenhum arquivo existir."""
+    paths = glob.glob(os.path.join(RESULTS, "resources", "usage*.csv"))
+    if not paths:
         return None
-    df = pd.read_csv(path)
+    df = pd.concat([pd.read_csv(p) for p in paths], ignore_index=True)
     for c in ["cpu_avg_pct", "cpu_max_pct", "mem_avg_pct", "mem_max_pct"]:
         if c not in df.columns:
             df[c] = np.nan

@@ -49,10 +49,12 @@ resource "aws_iam_role_policy_attachment" "lambda_vpc" {
 resource "aws_lambda_function" "fn" {
   for_each = local.fn_instances
 
-  function_name    = "${var.prefix}-${each.key}"
-  s3_bucket        = aws_s3_bucket.artifacts.id
-  s3_key           = aws_s3_object.lambda_jar.key
-  source_code_hash = aws_s3_object.lambda_jar.etag
+  function_name = "${var.prefix}-${each.key}"
+  s3_bucket     = aws_s3_bucket.artifacts.id
+  s3_key        = aws_s3_object.lambda_jar.key
+  # Hash local, não o etag do S3: em upload multipart o etag vira "md5-<partes>"
+  # e diverge do valor planejado, abortando o apply.
+  source_code_hash = filebase64sha256(var.serverless_jar_path)
   handler          = "org.springframework.cloud.function.adapter.aws.FunctionInvoker"
   runtime          = "java17"
   memory_size      = var.lambda_memory_mb

@@ -77,8 +77,9 @@ variable "serverless_jar_path" {
 
 # --- Microsserviços (imagens públicas oficiais) ---
 variable "micro_image_tag" {
-  type    = string
-  default = "latest"
+  description = "Tag das imagens springcommunity/spring-petclinic-*. FIXAR versão: 'latest' quebra a reprodutibilidade declarada no Quadro 2 (o experimento passaria a depender do que estiver no Docker Hub no dia)."
+  type        = string
+  default     = "3.4.1"
 }
 variable "config_git_uri" {
   description = "Repo git de configuração do spring-petclinic-microservices"

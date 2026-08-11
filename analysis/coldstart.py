@@ -10,8 +10,10 @@ Entrada: CSV com colunas
   invocation   -> cold | warm
   init_ms      -> Init Duration (só faz sentido no cold; 0/vazio no warm)
   duration_ms  -> duração do handler / tempo de resposta
+  billed_ms    -> Billed Duration (opcional; alimenta o modelo de custo, §3.6)
 Na AWS, esses valores saem da linha REPORT do CloudWatch Logs
-(campos "Init Duration" e "Duration"); aqui o mesmo formato é reaproveitado.
+(campos "Init Duration", "Duration" e "Billed Duration"); aqui o mesmo
+formato é reaproveitado.
 
 Uso:
   python analysis/coldstart.py [measurements.csv] [output_dir]
@@ -44,7 +46,7 @@ def ci95(x):
 def main():
     if not os.path.exists(CSV):
         sys.exit(f"Arquivo não encontrado: {CSV}\n"
-                 f"Formato: subscenario,invocation,init_ms,duration_ms")
+                 f"Formato: subscenario,invocation,init_ms,duration_ms[,billed_ms,mem_mb]")
     df = pd.read_csv(CSV, comment="#")
     df["subscenario"] = df["subscenario"].str.strip()
     df["invocation"] = df["invocation"].str.strip()
@@ -52,17 +54,28 @@ def main():
 
     # --- Tabela-resumo ---
     rows = []
+    has_billed = "billed_ms" in df.columns
     for s in subs:
         cold = df[(df.subscenario == s) & (df.invocation == "cold")]
         warm = df[(df.subscenario == s) & (df.invocation == "warm")]
-        rows.append({
+        row = {
             "subscenario": SUBLAB[s],
             "n_cold": len(cold), "n_warm": len(warm),
             "init_cold_med_ms": cold["init_ms"].median(),
             "init_cold_p95_ms": cold["init_ms"].quantile(0.95) if len(cold) else np.nan,
             "resp_cold_med_ms": cold["duration_ms"].median(),
             "resp_warm_med_ms": warm["duration_ms"].median(),
-        })
+        }
+        if has_billed:
+            # Billed Duration alimenta o modelo de custo (cost-model.py / §3.6)
+            row["billed_cold_med_ms"] = cold["billed_ms"].median()
+            row["billed_warm_med_ms"] = warm["billed_ms"].median()
+            row["billed_warm_p95_ms"] = warm["billed_ms"].quantile(0.95) if len(warm) else np.nan
+        if "mem_mb" in df.columns:
+            # memória usada (Max Memory Used) — §3.5, uso de recursos do serverless
+            both = pd.concat([cold["mem_mb"], warm["mem_mb"]])
+            row["mem_used_max_mb"] = both.max()
+        rows.append(row)
     summary = pd.DataFrame(rows)
     summary.to_csv(os.path.join(TAB, "coldstart_summary.csv"), index=False)
 

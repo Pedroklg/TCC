@@ -1,17 +1,11 @@
-# Captura cold start × warm start de um subcenário serverless na AWS.
-# Induz cold starts de forma controlada, invoca, e extrai do CloudWatch Logs as
-# linhas REPORT (Init Duration p/ sem-otim, Restore Duration p/ SnapStart, e Duration).
-# Saída no formato esperado por coldstart.py:
-#   subscenario,invocation,init_ms,duration_ms
+# Captura cold start × warm start de um subcenário serverless na AWS: induz cold
+# starts, invoca, e extrai das linhas REPORT do CloudWatch Logs o Init/Restore
+# Duration, o Billed Duration (modelo de custo, §3.6) e o Max Memory Used.
 #
-# Uso (exemplos):
-#   .\analysis\coldstart-capture.ps1 -Subscenario sem-otim `
-#       -Functions @('tcc-petclinic-cold-getAllOwners','tcc-petclinic-cold-getOwnerById') `
-#       -Reps 15 -WarmPerCold 5
-#   .\analysis\coldstart-capture.ps1 -Subscenario snapstart -Qualifier live `
-#       -Functions @('tcc-petclinic-snap-getAllOwners', ...) -Reps 15 -WarmPerCold 5
+# Saída lida por coldstart.py:
+#   subscenario,invocation,init_ms,duration_ms,billed_ms,mem_mb
 #
-# Requer: aws configure feito; permissão de lambda:* e logs:FilterLogEvents.
+# Como rodar: ver analysis/README.md.
 
 param(
   [Parameter(Mandatory)][ValidateSet('sem-otim', 'snapstart')][string]$Subscenario,
@@ -59,21 +53,25 @@ foreach ($fn in $Functions) {
   $events = aws logs filter-log-events --log-group-name $lg --region $Region `
     --start-time $startEpochMs --filter-pattern "REPORT" --query "events[].message" --output json 2>$null | ConvertFrom-Json
   foreach ($m in $events) {
-    $dur = if ($m -match 'Duration:\s*([\d.]+)\s*ms') { [double]$Matches[1] } else { $null }
+    $dur = if ($m -match '(?<!Billed )(?<!Init )(?<!Restore )Duration:\s*([\d.]+)\s*ms') { [double]$Matches[1] } else { $null }
+    $billed = if ($m -match 'Billed Duration:\s*([\d.]+)\s*ms') { [double]$Matches[1] } else { $null }
     $init = $null
     if ($m -match 'Init Duration:\s*([\d.]+)\s*ms') { $init = [double]$Matches[1] }
     elseif ($m -match 'Restore Duration:\s*([\d.]+)\s*ms') { $init = [double]$Matches[1] }
+    $mem = if ($m -match 'Max Memory Used:\s*([\d.]+)\s*MB') { [double]$Matches[1] } else { $null }
     $inv = if ($init) { 'cold' } else { 'warm' }
     if ($null -ne $dur) {
       $initVal = if ($init) { $init } else { 0 }
-      $rows += [pscustomobject]@{ subscenario = $Subscenario; invocation = $inv; init_ms = $initVal; duration_ms = $dur }
+      $billedVal = if ($null -ne $billed) { $billed } else { '' }
+      $memVal = if ($null -ne $mem) { $mem } else { '' }
+      $rows += [pscustomobject]@{ subscenario = $Subscenario; invocation = $inv; init_ms = $initVal; duration_ms = $dur; billed_ms = $billedVal; mem_mb = $memVal }
     }
   }
 }
 
 # Anexa ao CSV (cria cabeçalho se novo).
-if (-not (Test-Path $OutCsv)) { "subscenario,invocation,init_ms,duration_ms" | Out-File $OutCsv -Encoding utf8 }
-$rows | ForEach-Object { "$($_.subscenario),$($_.invocation),$($_.init_ms),$($_.duration_ms)" } | Out-File $OutCsv -Append -Encoding utf8
+if (-not (Test-Path $OutCsv)) { "subscenario,invocation,init_ms,duration_ms,billed_ms,mem_mb" | Out-File $OutCsv -Encoding utf8 }
+$rows | ForEach-Object { "$($_.subscenario),$($_.invocation),$($_.init_ms),$($_.duration_ms),$($_.billed_ms),$($_.mem_mb)" } | Out-File $OutCsv -Append -Encoding utf8
 
 $cold = ($rows | Where-Object invocation -eq 'cold').Count
 $warm = ($rows | Where-Object invocation -eq 'warm').Count

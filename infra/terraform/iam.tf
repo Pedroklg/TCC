@@ -27,6 +27,12 @@ resource "aws_iam_role_policy" "ec2_s3" {
   })
 }
 
+# CloudWatch Agent (memória da EC2 do monolito — §3.5): permite publicar métricas.
+resource "aws_iam_role_policy_attachment" "cw_agent" {
+  role       = aws_iam_role.ec2_s3.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
 resource "aws_iam_instance_profile" "ec2_s3" {
   name = "${var.prefix}-ec2-s3"
   role = aws_iam_role.ec2_s3.name

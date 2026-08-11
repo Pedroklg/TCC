@@ -11,11 +11,13 @@ param(
   [ValidateSet('mono', 'micro', 'serverless')]
   [string]$Target = 'mono',
   [string]$BaseUrl = '',
-  [int]$Reps = 10,  # repetições por cenário (§3.6 — 10 execuções; amostra representativa)
+  [int]$Reps = 10,  # repetições por cenário (§3.7 — 10 execuções; amostra representativa)
   [string]$Label = '',  # nome da pasta de resultados (default = Target); use p/ subcenários
                         # serverless: 'serverless-cold' e 'serverless-snap'
   [switch]$Quick,  # durações/VUs reduzidos só para validar o pipeline de coleta
-  [switch]$ResetBetweenReps  # reseta o MySQL (TRUNCATE+reseed) antes de cada rep (local)
+  [switch]$ResetBetweenReps,  # reseta o MySQL ao seed antes de cada rep (§3.7; só mono/micro)
+  [string]$DbSshHost = '',  # AWS: IP público da EC2 do MySQL -> reset REMOTO via SSH
+  [string]$DbSshKey = ''    # AWS: chave .pem do key pair (obrigatória com -DbSshHost)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,25 +45,49 @@ if ($Quick) {
 }
 
 # --- Latência de base do enlace ---
-# Deriva o host a partir da BASE_URL (ou usa localhost para os testes locais).
+# Handshake TCP, não ICMP: o ping exigiria uma regra ICMP no Security Group, e o
+# TCP percorre o mesmo caminho que o k6 usa.
 $probeHost = 'localhost'
-if ($BaseUrl) { $probeHost = ([Uri]$BaseUrl).Host }
-Write-Host "Medindo latência de base até $probeHost ..." -ForegroundColor Cyan
-try {
-  $ping = Test-Connection -ComputerName $probeHost -Count 5 -ErrorAction Stop
-  $avg = ($ping | Measure-Object -Property ResponseTime -Average).Average
-  "host=$probeHost avg_rtt_ms=$avg" | Out-File (Join-Path $outDir 'baseline-latency.txt')
-  Write-Host "  RTT médio: $avg ms" -ForegroundColor Green
-} catch {
-  "host=$probeHost rtt=indisponivel ($($_.Exception.Message))" | Out-File (Join-Path $outDir 'baseline-latency.txt')
-  Write-Host "  (ICMP indisponível — registrado mesmo assim)" -ForegroundColor Yellow
+$probePort = 80
+if ($BaseUrl) {
+  $u = [Uri]$BaseUrl
+  $probeHost = $u.Host
+  $probePort = $u.Port
+}
+Write-Host "Medindo latência de base até ${probeHost}:${probePort} ..." -ForegroundColor Cyan
+$rtts = @()
+foreach ($i in 1..5) {
+  $c = [Net.Sockets.TcpClient]::new()
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    if ($c.ConnectAsync($probeHost, $probePort).Wait(5000)) {
+      $sw.Stop()
+      $rtts += $sw.Elapsed.TotalMilliseconds
+    }
+  }
+  catch { }
+  finally { $c.Dispose() }
+}
+$baseFile = Join-Path $outDir 'baseline-latency.txt'
+if ($rtts.Count -gt 0) {
+  # min é menos sensível a jitter e ao DNS da primeira conexão que a média
+  $avg = [math]::Round(($rtts | Measure-Object -Average).Average, 2)
+  $min = [math]::Round(($rtts | Measure-Object -Minimum).Minimum, 2)
+  "host=$probeHost port=$probePort n=$($rtts.Count) avg_rtt_ms=$avg min_rtt_ms=$min" |
+    Out-File $baseFile -Encoding utf8
+  Write-Host "  RTT TCP: media $avg ms | min $min ms" -ForegroundColor Green
+}
+else {
+  "host=$probeHost port=$probePort rtt=indisponivel" | Out-File $baseFile -Encoding utf8
+  Write-Host "  (sonda TCP indisponivel - registrado mesmo assim)" -ForegroundColor Yellow
 }
 
-# Metadados do run (reprodutibilidade)
+# Metadados do run (reprodutibilidade). -Encoding utf8: o default do PS 5.1 é
+# UTF-16LE, ilegível para leitores JSON.
 @{
-  target = $Target; baseUrl = $BaseUrl; reps = $Reps; quick = [bool]$Quick
+  target    = $Target; baseUrl = $BaseUrl; reps = $Reps; quick = [bool]$Quick
   timestamp = $stamp; k6 = (k6 version)
-} | ConvertTo-Json | Out-File (Join-Path $outDir 'run-metadata.json')
+} | ConvertTo-Json | Out-File (Join-Path $outDir 'run-metadata.json') -Encoding utf8
 
 # --- Cenários × repetições ---
 $scenarios = @('constant', 'ramp', 'spike')
@@ -71,7 +97,9 @@ foreach ($s in $scenarios) {
     Write-Host "`n=== Cenário: $s | $tag/$Reps (alvo: $Target) ===" -ForegroundColor Cyan
     if ($ResetBetweenReps -and $Target -in @('mono', 'micro')) {
       Write-Host "  reset do banco (baseline limpo para a repetição)..." -ForegroundColor DarkGray
-      & (Join-Path $root 'infra\reset-db.ps1') -Target $Target | Out-Null
+      $resetArgs = @{ Target = $Target }
+      if ($DbSshHost) { $resetArgs.SshHost = $DbSshHost; $resetArgs.SshKey = $DbSshKey }
+      & (Join-Path $root 'infra\reset-db.ps1') @resetArgs | Out-Null
     }
     $summary = Join-Path $outDir "$s-$tag-summary.json"
     $raw = Join-Path $outDir "$s-$tag-raw.json"

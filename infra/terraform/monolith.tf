@@ -16,6 +16,13 @@ resource "aws_instance" "monolith" {
   })
   user_data_replace_on_change = true
 
-  depends_on = [aws_s3_object.mono_jar, aws_instance.mysql]
-  tags       = { Name = "${var.prefix}-monolith" }
+  # O user-data baixa o jar do S3 e instala pacotes via dnf: depende da política
+  # da role e da rota de saída, que o Terraform não infere do instance profile.
+  depends_on = [
+    aws_s3_object.mono_jar,
+    aws_instance.mysql,
+    aws_iam_role_policy.ec2_s3,
+    aws_route_table_association.public
+  ]
+  tags = { Name = "${var.prefix}-monolith" }
 }

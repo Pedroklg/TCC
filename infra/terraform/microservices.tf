@@ -3,9 +3,8 @@
 # ECS Service Connect (mantém os hostnames config-server/discovery-server), ALB
 # expõe o api-gateway. Imagens públicas oficiais (springcommunity/*).
 #
-# ⚠️ Braço mais complexo — validar no `terraform plan/apply` na AWS. Pontos de
-#    atenção anotados: ordem de subida (config/discovery primeiro; os apps fazem
-#    retry), health check do gateway, e a config do Service Connect.
+# A criação é escalonada em 3 níveis: os serviços não fazem retry e encerram se
+# o config-server ainda não responde. Ver aws_ecs_service.config.
 # =============================================================================
 
 locals {
@@ -19,6 +18,20 @@ locals {
     "api-gateway"       = { port = 8080, image = "api-gateway", mysql = false, alb = true, cpu = 512, memory = 1024 }
   }
   # Soma: 2.048 unidades de CPU (2 vCPU) e 4.096 MB (4 GB) — equivalente ao monolito (c5.large).
+
+  # Prefixo REST de cada serviço no gateway (singular, como no projeto oficial):
+  # /api/vet/** -> vets-service, /api/visit/** -> visits-service, etc.
+  route_prefix = {
+    "vets-service"      = "vet"
+    "visits-service"    = "visit"
+    "customers-service" = "customer"
+  }
+
+  # Níveis de inicialização (ver comentário em aws_ecs_service.config).
+  micro_platform = ["config-server", "discovery-server"]
+  tier_config    = { for k, v in local.micro_services : k => v if k == "config-server" }
+  tier_discovery = { for k, v in local.micro_services : k => v if k == "discovery-server" }
+  tier_apps      = { for k, v in local.micro_services : k => v if !contains(local.micro_platform, k) }
 }
 
 resource "aws_cloudwatch_log_group" "micro" {
@@ -81,7 +94,20 @@ resource "aws_ecs_task_definition" "svc" {
         { name = "SPRING_DATASOURCE_URL", value = "jdbc:mysql://${aws_instance.mysql.private_ip}:3306/${var.db_name}?allowPublicKeyRetrieval=true&useSSL=false" },
         { name = "SPRING_DATASOURCE_USERNAME", value = "root" },
         { name = "SPRING_DATASOURCE_PASSWORD", value = var.db_password },
-      ] : []
+      ] : [],
+
+      # Roteamento pelo DNS do Service Connect em vez de lb:// (Eureka), que
+      # registra o IP link-local do sidecar e não é alcançável entre tarefas.
+      # A lista definida por variável de ambiente substitui a do config-server:
+      # coleções são vinculadas de uma única fonte, e systemEnvironment vence.
+      each.key == "api-gateway" ? flatten([
+        for i, svc in ["vets-service", "visits-service", "customers-service"] : [
+          { name = "SPRING_CLOUD_GATEWAY_ROUTES_${i}_ID", value = svc },
+          { name = "SPRING_CLOUD_GATEWAY_ROUTES_${i}_URI", value = "http://${svc}:${local.micro_services[svc].port}" },
+          { name = "SPRING_CLOUD_GATEWAY_ROUTES_${i}_PREDICATES_0", value = "Path=/api/${local.route_prefix[svc]}/**" },
+          { name = "SPRING_CLOUD_GATEWAY_ROUTES_${i}_FILTERS_0", value = "StripPrefix=2" },
+        ]
+      ]) : []
     )
     logConfiguration = {
       logDriver = "awslogs"
@@ -94,14 +120,21 @@ resource "aws_ecs_task_definition" "svc" {
   }])
 }
 
-# Serviços ECS (Fargate) + Service Connect.
-resource "aws_ecs_service" "svc" {
-  for_each        = local.micro_services
-  name            = each.key
-  cluster         = aws_ecs_cluster.micro.id
-  task_definition = aws_ecs_task_definition.svc[each.key].arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
+# Serviços ECS (Fargate) + Service Connect, em 3 níveis.
+#
+# O DNS do Service Connect só publica o alias de um serviço depois que ele tem
+# tarefa rodando; wait_for_steady_state faz o Terraform esperar cada nível antes
+# de criar o próximo. O último nível mantém o nome "svc": o -target do
+# orquestrador aponta para ele e o depends_on puxa os anteriores.
+
+resource "aws_ecs_service" "config" {
+  for_each              = local.tier_config
+  name                  = each.key
+  cluster               = aws_ecs_cluster.micro.id
+  task_definition       = aws_ecs_task_definition.svc[each.key].arn
+  desired_count         = 1
+  launch_type           = "FARGATE"
+  wait_for_steady_state = true
 
   network_configuration {
     subnets          = aws_subnet.public[*].id
@@ -117,7 +150,68 @@ resource "aws_ecs_service" "svc" {
       discovery_name = each.key
       client_alias {
         port     = each.value.port
-        dns_name = each.key # hostname = config-server / discovery-server / ...
+        dns_name = each.key
+      }
+    }
+  }
+}
+
+# Nível 2 — busca configuração no config-server, por isso espera o nível 1.
+resource "aws_ecs_service" "discovery" {
+  for_each              = local.tier_discovery
+  name                  = each.key
+  cluster               = aws_ecs_cluster.micro.id
+  task_definition       = aws_ecs_task_definition.svc[each.key].arn
+  desired_count         = 1
+  launch_type           = "FARGATE"
+  wait_for_steady_state = true
+
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.micro.id]
+    assign_public_ip = true
+  }
+
+  service_connect_configuration {
+    enabled   = true
+    namespace = aws_service_discovery_http_namespace.micro.arn
+    service {
+      port_name      = each.key
+      discovery_name = each.key
+      client_alias {
+        port     = each.value.port
+        dns_name = each.key
+      }
+    }
+  }
+
+  depends_on = [aws_ecs_service.config]
+}
+
+# Nível 3 — serviços de negócio + gateway: precisam de config E de Eureka.
+resource "aws_ecs_service" "svc" {
+  for_each        = local.tier_apps
+  name            = each.key
+  cluster         = aws_ecs_cluster.micro.id
+  task_definition = aws_ecs_task_definition.svc[each.key].arn
+  desired_count   = 1
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.micro.id]
+    assign_public_ip = true
+  }
+
+  service_connect_configuration {
+    enabled   = true
+    namespace = aws_service_discovery_http_namespace.micro.arn
+    service {
+      port_name      = each.key
+      discovery_name = each.key
+      client_alias {
+        port     = each.value.port
+        dns_name = each.key
       }
     }
   }
@@ -132,6 +226,8 @@ resource "aws_ecs_service" "svc" {
     }
   }
   health_check_grace_period_seconds = each.value.alb ? 180 : null
+
+  depends_on = [aws_ecs_service.discovery]
 }
 
 # --- ALB para o api-gateway ---

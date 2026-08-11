@@ -1,15 +1,13 @@
-# Captura uso de recursos (CPU/memória) do CloudWatch na janela de medição (AWS).
-# Métrica comparável entre EC2 e Fargate: utilização de CPU (%). Para o Lambda,
-# coleta-se a duração (proxy de uso); a memória usada está na linha REPORT dos logs
-# (ver coldstart-capture.ps1). Saída no formato lido por analyze.py::resource_usage.
+# Captura uso de recursos do CloudWatch na janela de medição (AWS), no formato
+# lido por analyze.py::resource_usage.
+#   EC2      CPU (AWS/EC2) + memória (CWAgent, instalado pelo user-data)
+#   ECS      CPU e memória por serviço
+#   Lambda   duração como proxy de uso; a memória sai da linha REPORT
 #
-# Uso (exemplo):
-#   .\analysis\cloudwatch-capture.ps1 -Start "2026-06-01T14:00:00Z" -End "2026-06-01T14:10:00Z" `
-#       -MonoInstanceId i-aaa -MysqlInstanceId i-bbb `
-#       -EcsCluster tcc-petclinic-micro -EcsServices @('customers-service','vets-service','visits-service','api-gateway','config-server','discovery-server')
+# Conta também, na mesma janela, a fração de invocações a frio por subcenário
+# (f_fria, §3.6) -> results/resources/lambda_cold_fraction.csv.
 #
-# Requer aws configure feito. Obs.: a MEMÓRIA da EC2 só aparece no CloudWatch com o
-# CloudWatch Agent instalado; sem ele, registra-se apenas CPU para a EC2.
+# Como rodar: ver analysis/README.md.
 
 param(
   [Parameter(Mandatory)][string]$Start,   # ISO-8601 UTC
@@ -24,6 +22,9 @@ param(
   [string]$OutCsv = 'results/resources/usage.csv'
 )
 $ErrorActionPreference = 'Stop'
+# Cultura invariante: Export-Csv usa a cultura corrente e em pt-BR gravaria
+# "24,1", que o pandas lê como texto.
+[Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
 $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
 New-Item -ItemType Directory -Force -Path (Split-Path $OutCsv) | Out-Null
 
@@ -39,15 +40,17 @@ function Stat($ns, $metric, $dimName, $dimVal) {
 
 $rows = @()
 function Add($arch, $comp, $cpu, $mem) {
-  $rows += [pscustomobject]@{
+  # $script: é obrigatório — dentro de uma função, "$rows +=" grava numa cópia
+  # local e a linha se perde, gerando um CSV vazio sem erro.
+  $script:rows += [pscustomobject]@{
     architecture = $arch; component = $comp
     cpu_avg_pct = $cpu.avg; cpu_max_pct = $cpu.max
     mem_avg_pct = $mem.avg; mem_max_pct = $mem.max
   }
 }
 
-# Monolito (EC2): CPU. (Memória só com CloudWatch Agent.)
-if ($MonoInstanceId) { Add 'Monolito' 'ec2' (Stat 'AWS/EC2' 'CPUUtilization' 'InstanceId' $MonoInstanceId) @{avg = $null; max = $null } }
+# Monolito (EC2): CPU (AWS/EC2) + memória (CWAgent, instalado pelo user-data).
+if ($MonoInstanceId) { Add 'Monolito' 'ec2' (Stat 'AWS/EC2' 'CPUUtilization' 'InstanceId' $MonoInstanceId) (Stat 'CWAgent' 'mem_used_percent' 'InstanceId' $MonoInstanceId) }
 # MySQL (comum) — informativo
 if ($MysqlInstanceId) { Add 'MySQL' 'ec2' (Stat 'AWS/EC2' 'CPUUtilization' 'InstanceId' $MysqlInstanceId) @{avg = $null; max = $null } }
 
@@ -72,3 +75,30 @@ foreach ($fn in $LambdaFunctions) {
 
 $rows | Export-Csv -Path $OutCsv -NoTypeInformation -Encoding utf8
 "Uso de recursos salvo em $OutCsv ($($rows.Count) componentes). Depois: python analysis/analyze.py"
+
+# --- f_fria (§3.6): fração de invocações a frio OBSERVADA na janela de teste ---
+# Conta as linhas REPORT com Init/Restore Duration vs o total, por subcenário
+# (nome da função contém -cold- ou -snap-). Alimenta analysis/cost-model.py.
+if ($LambdaFunctions) {
+  $t0 = [DateTimeOffset]::Parse($Start).ToUnixTimeMilliseconds()
+  $t1 = [DateTimeOffset]::Parse($End).ToUnixTimeMilliseconds()
+  $frac = @{}
+  foreach ($fn in $LambdaFunctions) {
+    $sub = if ($fn -match '-snap-') { 'snapstart' } elseif ($fn -match '-cold-') { 'sem-otim' } else { 'desconhecido' }
+    if (-not $frac.ContainsKey($sub)) { $frac[$sub] = @{ total = 0; cold = 0 } }
+    $events = aws logs filter-log-events --log-group-name "/aws/lambda/$fn" --region $Region `
+      --start-time $t0 --end-time $t1 --filter-pattern "REPORT" --query "events[].message" --output json 2>$null | ConvertFrom-Json
+    foreach ($m in $events) {
+      $frac[$sub].total++
+      if ($m -match 'Init Duration:|Restore Duration:') { $frac[$sub].cold++ }
+    }
+  }
+  $fracCsv = Join-Path (Split-Path $OutCsv) 'lambda_cold_fraction.csv'
+  $fracRows = foreach ($k in $frac.Keys) {
+    $t = $frac[$k].total; $c = $frac[$k].cold
+    [pscustomobject]@{ subscenario = $k; invocations = $t; cold = $c
+      cold_fraction = $(if ($t -gt 0) { [math]::Round($c / $t, 4) } else { $null }) }
+  }
+  $fracRows | Export-Csv -Path $fracCsv -NoTypeInformation -Encoding utf8
+  "Fração de cold starts na janela salva em $fracCsv"
+}

@@ -15,6 +15,12 @@ resource "aws_instance" "mysql" {
   })
   user_data_replace_on_change = true
 
-  depends_on = [aws_s3_object.schema_sql, aws_s3_object.data_sql]
-  tags       = { Name = "${var.prefix}-mysql" }
+  # Ver monolith.tf: o user-data também precisa de S3 e de saída para a internet.
+  depends_on = [
+    aws_s3_object.schema_sql,
+    aws_s3_object.data_sql,
+    aws_iam_role_policy.ec2_s3,
+    aws_route_table_association.public
+  ]
+  tags = { Name = "${var.prefix}-mysql" }
 }

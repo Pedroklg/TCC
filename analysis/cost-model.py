@@ -1,15 +1,24 @@
 """
-Modelo de custo das três arquiteturas na AWS (us-east-1), em função do volume de
-requisições mensal. Premissa: os custos de EC2/Fargate são por TEMPO
-(independem da carga) e o de Lambda é por USO — logo, a arquitetura mais econômica
-depende do perfil de tráfego. Identifica o ponto de equilíbrio (break-even).
+Modelo de custo das três arquiteturas na AWS (us-east-1) — seção 3.6 da monografia.
 
-NÃO chama a AWS: é uma modelagem a partir de preços públicos + uso medido (ambos
-parametrizáveis). Atualize os preços e o uso (duração média do Lambda) com os valores
-reais antes de usar no Capítulo 4.
+Premissa: EC2/Fargate custam por TEMPO (independem da carga) e o Lambda por USO —
+logo, a arquitetura mais econômica depende do perfil de tráfego. O modelo produz:
+  1. custo mensal × volume, com banda de sensibilidade e break-even como FAIXA
+     (duração cobrada p50/p95 × sob demanda vs descontos por compromisso);
+  2. custo por milhão de requisições (curva — depende do volume pela parcela fixa);
+  3. custo-eficiência: custo mensal por req/s sustentado no ponto de saturação
+     (monolito e microsserviços; lê analysis/tables/saturation.csv se existir);
+  4. mapa de decisão: taxa ativa × fração ativa do mês -> arquitetura mais barata;
+  5. decomposição do custo serverless por milhão de requisições (cold × snap).
+
+NÃO chama a AWS: modelagem a partir de preços públicos + uso medido, ambos
+parametrizáveis. A duração COBRADA (Billed Duration) vem da captura de cold start
+(analysis/tables/coldstart_summary.csv, colunas billed_*) ou de variáveis de
+ambiente. Atualizar preços/descontos na data da análise (fontes na Tabela de
+preços da monografia, seção 3.6).
 
 Uso:  python analysis/cost-model.py
-      LAMBDA_AVG_DUR_S=0.05 python analysis/cost-model.py
+      LAMBDA_BILLED_WARM_S=0.05 COLD_FRACTION=0.01 python analysis/cost-model.py
 """
 import os
 import numpy as np
@@ -19,92 +28,345 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 OUT = "analysis"
+RES = "results"
 FIG, TAB = os.path.join(OUT, "figures"), os.path.join(OUT, "tables")
 os.makedirs(FIG, exist_ok=True)
 os.makedirs(TAB, exist_ok=True)
 
 HOURS_MONTH = 730
 
-# --- Preços us-east-1 (USD) — CONFERIR/ATUALIZAR ---
+# --- Preços us-east-1 (USD), consultados em 18 jul. 2026 — RECONFERIR na execução ---
 P = {
     "ec2_c5_large_hr": 0.085,       # monolito (c5.large, 2 vCPU/4 GB)
     "ec2_m5_large_hr": 0.096,       # MySQL (m5.large, 2 vCPU/8 GB)
     "fargate_vcpu_hr": 0.04048,
     "fargate_gb_hr": 0.004445,
     "alb_hr": 0.0225,
-    "lambda_req": 0.20 / 1_000_000,     # por requisição
-    "lambda_gb_s": 0.0000166667,        # por GB-s
-    "apigw_req": 1.00 / 1_000_000,      # API Gateway HTTP por requisição
+    "alb_lcu_hr": 0.008,            # por LCU-hora
+    "lambda_req": 0.20 / 1_000_000,
+    "lambda_gb_s": 0.0000166667,
+    "apigw_req": 1.00 / 1_000_000,  # API Gateway HTTP (até 300 M/mês)
+}
+
+# Fatores de desconto por compromisso sobre o preço sob demanda (compute apenas).
+# PLACEHOLDERS plausíveis — confirmar na página oficial na data da análise e
+# registrar prazo/forma de pagamento (ex.: RI padrão 1 ano sem adiantamento).
+# O desconto do Lambda via Compute Savings Plans (~17%) é ignorado: simplificação
+# conservadora CONTRA o serverless no break-even.
+PRICING_MODES = {
+    "on-demand": {"ec2": 1.00, "fargate": 1.00},
+    "ri-1y":     {"ec2": 0.64, "fargate": 0.80},
+    "ri-3y":     {"ec2": 0.42, "fargate": 0.50},
 }
 
 # --- Dimensionamento (Quadro 2) ---
 FARGATE_VCPU, FARGATE_GB = 2.0, 4.0       # soma das 6 tarefas
 LAMBDA_MEM_GB = 1769 / 1024               # ≈ 1 vCPU/invocação
-# Uso medido (preencher com a AWS): duração média por invocação (s).
-LAMBDA_AVG_DUR_S = float(os.environ.get("LAMBDA_AVG_DUR_S", "0.05"))
+
+# --- Uso medido (preencher com a AWS; env sobrepõe o CSV) ---
+ENV = os.environ.get
+BILLED_WARM_S = float(ENV("LAMBDA_BILLED_WARM_S", "0.05"))   # mediana cobrada (warm)
+BILLED_P95_S = float(ENV("LAMBDA_BILLED_P95_S", "0.15"))     # p95 cobrado
+COLD_FRACTION = float(ENV("COLD_FRACTION", "0.01"))          # f_fria no tráfego real
+COLD_EXTRA_S = float(ENV("COLD_EXTRA_S", "2.0"))             # d_extra por invocação fria
+AVG_RESP_KB = float(ENV("AVG_RESP_KB", "5"))                 # p/ dimensão de bytes da LCU
 
 # O MySQL é compartilhado pelas três (sempre ligado) — custo COMUM.
 MYSQL_MONTH = P["ec2_m5_large_hr"] * HOURS_MONTH
 
 
-def cost(req_month):
-    """Custo mensal (USD) de cada arquitetura para um volume de requisições."""
-    mono = P["ec2_c5_large_hr"] * HOURS_MONTH + MYSQL_MONTH
-    fargate = ((FARGATE_VCPU * P["fargate_vcpu_hr"] + FARGATE_GB * P["fargate_gb_hr"]) * HOURS_MONTH
-               + P["alb_hr"] * HOURS_MONTH + MYSQL_MONTH)
-    gb_s = LAMBDA_MEM_GB * LAMBDA_AVG_DUR_S * req_month
-    serverless = (req_month * P["lambda_req"] + gb_s * P["lambda_gb_s"]
-                  + req_month * P["apigw_req"] + MYSQL_MONTH)
+def load_coldstart_measured():
+    """Sobrepõe os defaults com a captura real (billed_*), se disponível."""
+    path = os.path.join(TAB, "coldstart_summary.csv")
+    if not os.path.exists(path):
+        return {}
+    df = pd.read_csv(path)
+    out = {}
+    for _, r in df.iterrows():
+        # o summary usa rótulos legíveis ("Sem otimização"/"SnapStart") — normaliza
+        sub = "snapstart" if "snap" in str(r["subscenario"]).lower() else "sem-otim"
+        warm = r.get("billed_warm_med_ms", np.nan)
+        cold = r.get("billed_cold_med_ms", np.nan)
+        p95 = r.get("billed_warm_p95_ms", np.nan)
+        if pd.notna(warm) and pd.notna(cold):
+            out[sub] = {"warm_s": warm / 1000.0, "extra_s": max(cold - warm, 0) / 1000.0}
+            if pd.notna(p95):
+                out[sub]["warm_p95_s"] = p95 / 1000.0
+        elif pd.notna(r.get("init_cold_med_ms", np.nan)):
+            # fallback: INIT tarifado ≈ acréscimo cobrado no cold
+            out[sub] = {"warm_s": BILLED_WARM_S, "extra_s": r["init_cold_med_ms"] / 1000.0}
+    return out
+
+
+def load_cold_fraction():
+    """f_fria observada na janela dos testes (cloudwatch-capture.ps1), por subcenário."""
+    path = os.path.join(RES, "resources", "lambda_cold_fraction.csv")
+    if not os.path.exists(path):
+        return {}
+    df = pd.read_csv(path)
+    return {str(r["subscenario"]).strip(): float(r["cold_fraction"])
+            for _, r in df.iterrows() if pd.notna(r.get("cold_fraction", np.nan))}
+
+
+def load_avg_resp_kb():
+    """Tamanho médio de resposta (KB/req) dos summaries do k6 — dimensão de bytes da LCU."""
+    import glob as _glob
+    import json as _json
+    total_bytes, total_reqs = 0.0, 0.0
+    for p in _glob.glob(os.path.join(RES, "*", "*", "*-summary.json")):
+        try:
+            with open(p, encoding="utf-8") as f:
+                m = _json.load(f).get("metrics", {})
+            total_bytes += m.get("data_received", {}).get("count", 0)
+            total_reqs += m.get("http_reqs", {}).get("count", 0)
+        except (OSError, ValueError):
+            continue
+    return (total_bytes / total_reqs / 1024.0) if total_reqs > 0 else None
+
+
+def apply_measured_overrides(measured):
+    """Medições reais sobrepõem os defaults — mas a env explícita sempre vence."""
+    global BILLED_WARM_S, BILLED_P95_S, COLD_FRACTION, COLD_EXTRA_S, AVG_RESP_KB
+    ref = measured.get("sem-otim") or measured.get("snapstart")
+    if ref:
+        if "LAMBDA_BILLED_WARM_S" not in os.environ:
+            BILLED_WARM_S = ref["warm_s"]
+        if "LAMBDA_BILLED_P95_S" not in os.environ and "warm_p95_s" in ref:
+            BILLED_P95_S = ref["warm_p95_s"]
+        if "COLD_EXTRA_S" not in os.environ:
+            COLD_EXTRA_S = ref["extra_s"]
+    frac = load_cold_fraction()
+    if frac and "COLD_FRACTION" not in os.environ:
+        COLD_FRACTION = frac.get("sem-otim", next(iter(frac.values())))
+    if "AVG_RESP_KB" not in os.environ:
+        kb = load_avg_resp_kb()
+        if kb:
+            AVG_RESP_KB = kb
+    return frac
+
+
+def lcu_units(rps):
+    """Estimativa de LCU no período ativo: máx. entre conexões novas (pior caso,
+    1 conexão/req) e bytes processados; as dimensões de conexões ativas e de
+    regras são dominadas por essas nos cenários do experimento."""
+    new_conn = rps / 25.0
+    gb_hour = rps * 3600 * AVG_RESP_KB / 1e6
+    return max(new_conn, gb_hour / 1.0)
+
+
+def cost(req_month, mode="on-demand", warm_s=None, f_cold=None, extra_s=None,
+         active_frac=1.0):
+    """Custo mensal (USD) por arquitetura. `active_frac` afeta só a LCU (as
+    parcelas de tempo das contínuas independem da atividade; o serverless
+    depende apenas de req_month)."""
+    d = PRICING_MODES[mode]
+    warm_s = BILLED_WARM_S if warm_s is None else warm_s
+    f_cold = COLD_FRACTION if f_cold is None else f_cold
+    extra_s = COLD_EXTRA_S if extra_s is None else extra_s
+
+    mono = P["ec2_c5_large_hr"] * d["ec2"] * HOURS_MONTH + MYSQL_MONTH
+
+    active_h = HOURS_MONTH * active_frac
+    rps_active = req_month / (active_h * 3600) if active_h > 0 else 0.0
+    fargate = ((FARGATE_VCPU * P["fargate_vcpu_hr"] + FARGATE_GB * P["fargate_gb_hr"])
+               * d["fargate"] * HOURS_MONTH
+               + P["alb_hr"] * HOURS_MONTH
+               + P["alb_lcu_hr"] * lcu_units(rps_active) * active_h
+               + MYSQL_MONTH)
+
+    billed_s = warm_s + f_cold * extra_s          # d_cobr = d_quente + f_fria*d_extra
+    gb_s = LAMBDA_MEM_GB * billed_s * req_month
+    serverless = (req_month * (P["lambda_req"] + P["apigw_req"])
+                  + gb_s * P["lambda_gb_s"] + MYSQL_MONTH)
     return {"Monolito": mono, "Microsserviços": fargate, "Serverless": serverless}
 
 
-def main():
-    # varre de 100 mil a 1 bilhão de requisições/mês (escala log)
-    reqs = np.logspace(5, 9, 200)
-    df = pd.DataFrame([cost(r) for r in reqs], index=reqs)
+def breakeven(reqs, srv, cont):
+    diff = srv - cont
+    idx = np.where(np.diff(np.sign(diff)) != 0)[0]
+    return reqs[idx[0]] if len(idx) else None
 
-    # break-even: onde o serverless cruza cada arquitetura contínua
-    crossings = {}
-    for arch in ["Monolito", "Microsserviços"]:
-        diff = (df["Serverless"] - df[arch]).values
-        sign = np.sign(diff)
-        idx = np.where(np.diff(sign) != 0)[0]
-        crossings[arch] = reqs[idx[0]] if len(idx) else None
 
-    # --- gráfico ---
+def fig_breakeven_band(reqs):
+    """Curvas de custo com banda de sensibilidade + faixa de break-even."""
+    srv_lo = np.array([cost(r, warm_s=BILLED_WARM_S)["Serverless"] for r in reqs])
+    srv_hi = np.array([cost(r, warm_s=BILLED_P95_S)["Serverless"] for r in reqs])
     fig, ax = plt.subplots(figsize=(9, 5))
-    for arch in ["Monolito", "Microsserviços", "Serverless"]:
-        ax.plot(reqs, df[arch], label=arch, linewidth=1.8)
-    for arch, x in crossings.items():
-        if x:
-            ax.axvline(x, color="gray", ls="--", alpha=0.5)
-            ax.text(x, ax.get_ylim()[1] * 0.9, f"  break-even\n  {x:,.0f} req/mês",
-                    fontsize=8, rotation=90, va="top")
+    ax.fill_between(reqs, srv_lo, srv_hi, alpha=0.25, color="tab:green",
+                    label="Serverless (duração cobrada p50–p95)")
+    ax.plot(reqs, srv_lo, color="tab:green", linewidth=1.2)
+
+    rows = []
+    for arch, color in [("Monolito", "tab:blue"), ("Microsserviços", "tab:orange")]:
+        for mode, ls in [("on-demand", "-"), ("ri-3y", "--")]:
+            c = np.array([cost(r, mode=mode)[arch] for r in reqs])
+            ax.plot(reqs, c, ls, color=color, linewidth=1.6,
+                    label=f"{arch} ({mode})")
+            for d_label, srv in [("p50", srv_lo), ("p95", srv_hi)]:
+                be = breakeven(reqs, srv, c)
+                rows.append({"arquitetura": arch, "preco": mode, "duracao": d_label,
+                             "breakeven_req_mes": None if be is None else round(be)})
     ax.set_xscale("log")
     ax.set_xlabel("Requisições por mês")
     ax.set_ylabel("Custo mensal estimado (USD)")
-    ax.set_title("Custo por arquitetura × volume de tráfego (us-east-1)")
-    ax.legend(title="Arquitetura")
+    ax.set_title("Custo × volume, com sensibilidade (us-east-1)")
+    ax.legend(fontsize=8)
     ax.grid(alpha=0.3, which="both")
     fig.tight_layout()
-    fig.savefig(os.path.join(FIG, "cost_breakeven.png"), dpi=150)
+    fig.savefig(os.path.join(FIG, "cost_sensitivity.png"), dpi=150)
     plt.close(fig)
 
-    # --- tabela em perfis representativos ---
-    profiles = {"baixo (1 req/s)": 2.6e6, "médio (50 req/s)": 1.3e8, "alto (500 req/s)": 1.3e9}
-    rows = [{"perfil": k, **{a: round(v, 2) for a, v in cost(r).items()}} for k, r in profiles.items()]
+    be = pd.DataFrame(rows)
+    be.to_csv(os.path.join(TAB, "cost_breakeven_range.csv"), index=False)
+    return be
+
+
+def fig_per_million(reqs):
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for arch in ["Monolito", "Microsserviços", "Serverless"]:
+        c = np.array([cost(r)[arch] / r * 1e6 for r in reqs])
+        ax.plot(reqs, c, label=arch, linewidth=1.8)
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlabel("Requisições por mês")
+    ax.set_ylabel("Custo por milhão de requisições (USD)")
+    ax.set_title("Custo por requisição × volume (inclui custo comum do SGBD)")
+    ax.legend(); ax.grid(alpha=0.3, which="both")
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG, "cost_per_million.png"), dpi=150)
+    plt.close(fig)
+
+
+def fig_decision_map():
+    """Taxa média no período ativo × fração ativa do mês -> mais barata."""
+    rates = np.logspace(-1, 3, 120)          # 0,1 a 1000 req/s no período ativo
+    fracs = np.linspace(0.01, 1.0, 100)      # fração ativa do mês
+    archs = ["Monolito", "Microsserviços", "Serverless"]
+    grid = np.zeros((len(fracs), len(rates)), dtype=int)
+    for i, f in enumerate(fracs):
+        for j, r in enumerate(rates):
+            v = r * 3600 * HOURS_MONTH * f
+            c = cost(v, active_frac=f)
+            grid[i, j] = int(np.argmin([c[a] for a in archs]))
+    fig, ax = plt.subplots(figsize=(9, 5))
+    cmap = matplotlib.colors.ListedColormap(["#aec7e8", "#ffbb78", "#98df8a"])
+    ax.pcolormesh(rates, fracs, grid, cmap=cmap, vmin=0, vmax=2, shading="auto")
+    ax.set_xscale("log")
+    ax.set_xlabel("Taxa média no período ativo (req/s)")
+    ax.set_ylabel("Fração ativa do mês")
+    ax.set_title("Arquitetura mais barata por perfil de tráfego")
+    handles = [plt.Rectangle((0, 0), 1, 1, color=c)
+               for c in ["#aec7e8", "#ffbb78", "#98df8a"]]
+    ax.legend(handles, archs, loc="upper left", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG, "cost_decision_map.png"), dpi=150)
+    plt.close(fig)
+
+
+def fig_breakdown(measured, frac):
+    """Decomposição do custo serverless por milhão de req, cold × snap."""
+    subs = {"sem-otim": measured.get("sem-otim"),
+            "snapstart": measured.get("snapstart")}
+    # defaults se a captura ainda não existe (SnapStart: acréscimo ~10× menor)
+    for k, v in subs.items():
+        if v is None:
+            subs[k] = {"warm_s": BILLED_WARM_S,
+                       "extra_s": COLD_EXTRA_S if k == "sem-otim" else COLD_EXTRA_S / 10}
+    labels, req_c, gw_c, gbs_warm, gbs_cold = [], [], [], [], []
+    for k, v in subs.items():
+        f_sub = frac.get(k, COLD_FRACTION)  # f_fria medida por subcenário, se houver
+        labels.append({"sem-otim": "Sem otimização", "snapstart": "SnapStart"}[k])
+        req_c.append(0.20)
+        gw_c.append(1.00)
+        gbs_warm.append(LAMBDA_MEM_GB * v["warm_s"] * P["lambda_gb_s"] * 1e6)
+        gbs_cold.append(LAMBDA_MEM_GB * f_sub * v["extra_s"] * P["lambda_gb_s"] * 1e6)
+    x = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(7, 5))
+    bottom = np.zeros(len(labels))
+    for vals, lab, color in [(req_c, "Requisições Lambda", "#1f77b4"),
+                             (gw_c, "API Gateway", "#ff7f0e"),
+                             (gbs_warm, "GB-s (warm)", "#2ca02c"),
+                             (gbs_cold, "GB-s (cold extra)", "#d62728")]:
+        ax.bar(x, vals, 0.5, bottom=bottom, label=lab, color=color)
+        bottom += np.array(vals)
+    ax.set_xticks(x); ax.set_xticklabels(labels)
+    ax.set_ylabel("USD por milhão de requisições")
+    ax.set_title(f"Custo serverless por componente (f_fria={COLD_FRACTION:.0%})")
+    ax.legend(); ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG, "cost_breakdown_serverless.png"), dpi=150)
+    plt.close(fig)
+
+
+def table_efficiency():
+    """Custo mensal por req/s sustentado (E_a = C_a / X*_a) — usa saturation.csv."""
+    path = os.path.join(TAB, "saturation.csv")
+    if not os.path.exists(path):
+        print("[custo-eficiência] saturation.csv ainda não existe — pulado "
+              "(rode analysis/analyze.py com os resultados da Fase 7).")
+        return None
+    sat = pd.read_csv(path)
+    col = "throughput_max_sustentavel_rps"
+    if col not in sat.columns or "target" not in sat.columns:
+        print(f"[custo-eficiência] colunas esperadas ausentes em {path} — pulado.")
+        return None
+    xstar = sat.groupby("target")[col].max()
+    base = cost(1e6)  # parcela fixa domina; volume irrelevante p/ contínuas
+    mapping = {"mono": "Monolito", "micro": "Microsserviços"}
+    rows = []
+    for tgt, arch in mapping.items():
+        match = [t for t in xstar.index if str(t).startswith(tgt)]
+        if match:
+            x = float(xstar[match[0]])
+            rows.append({"arquitetura": arch, "throughput_sustentado_rps": round(x, 1),
+                         "custo_mensal_usd": round(base[arch], 2),
+                         "usd_mes_por_rps": round(base[arch] / x, 2) if x else np.nan})
+    if not rows:
+        return None
+    eff = pd.DataFrame(rows)
+    eff.to_csv(os.path.join(TAB, "cost_efficiency.csv"), index=False)
+    return eff
+
+
+def main():
+    measured = load_coldstart_measured()
+    frac = apply_measured_overrides(measured)
+    reqs = np.logspace(5, 9, 300)  # 100 mil a 1 bilhão de req/mês
+
+    be = fig_breakeven_band(reqs)
+    fig_per_million(reqs)
+    fig_decision_map()
+    fig_breakdown(measured, frac)
+    eff = table_efficiency()
+
+    # tabela por perfil (volume × fração ativa)
+    profiles = [
+        ("baixo contínuo (1 req/s, 24/7)", 1, 1.00),
+        ("médio contínuo (50 req/s, 24/7)", 50, 1.00),
+        ("alto contínuo (500 req/s, 24/7)", 500, 1.00),
+        ("médio comercial (50 req/s, 24% do mês)", 50, 0.24),
+        ("picos esporádicos (100 req/s, 5% do mês)", 100, 0.05),
+    ]
+    rows = []
+    for label, rps, f in profiles:
+        v = rps * 3600 * HOURS_MONTH * f
+        rows.append({"perfil": label, "req_mes": round(v),
+                     **{a: round(c, 2) for a, c in cost(v, active_frac=f).items()}})
     tab = pd.DataFrame(rows)
     tab.to_csv(os.path.join(TAB, "cost_by_profile.csv"), index=False)
 
-    pd.set_option("display.width", 160)
+    pd.set_option("display.width", 170)
     print("=== Custo mensal estimado (USD) por perfil de tráfego ===")
     print(tab.to_string(index=False))
-    print("\n=== Break-even (Serverless cruza a arquitetura contínua) ===")
-    for arch, x in crossings.items():
-        print(f"  Serverless × {arch}: {('%.0f req/mês' % x) if x else 'sem cruzamento na faixa'}")
-    print("\nNota: o MySQL (sempre ligado) é custo COMUM às três — por isso o serverless "
-          "também tem um piso fixo. Atualize preços e LAMBDA_AVG_DUR_S com os valores reais.")
-    print(f"Figura: {FIG}/cost_breakeven.png | Tabela: {TAB}/cost_by_profile.csv")
+    print("\n=== Break-even serverless × contínuas (FAIXA de sensibilidade) ===")
+    print(be.to_string(index=False))
+    if eff is not None:
+        print("\n=== Custo-eficiência (USD/mês por req/s sustentado) ===")
+        print(eff.to_string(index=False))
+    print("\nNotas: MySQL sempre ligado é custo COMUM às três (piso fixo). "
+          "Fatores de desconto (ri-1y/ri-3y) são placeholders — confirmar prazo/forma "
+          "de pagamento na data da análise. Duração cobrada: usar Billed Duration "
+          "medida (coldstart-capture) antes do Cap. 4.")
+    print(f"Figuras em {FIG}/ | Tabelas em {TAB}/")
 
 
 if __name__ == "__main__":

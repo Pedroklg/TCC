@@ -1,18 +1,36 @@
-﻿# Reseta o MySQL de um alvo LOCAL ao estado-semente (baseline), para que cada
-# repetição de teste comece idêntica (seção 3.6). Estratégia: TRUNCATE de todas as
-# tabelas + recarga dos data.sql oficiais (INSERT IGNORE com IDs fixos). As apps
-# continuam de pé (sem cache de 2º nível; leem do banco a cada requisição).
+﻿# Reseta o MySQL ao estado-semente para que cada repetição comece idêntica (§3.7).
 #
-# Uso: .\infra\reset-db.ps1 -Target mono|micro
-#
-# Na AWS o banco é remoto — o equivalente é aplicar os mesmos data.sql no MySQL
-# da nuvem (a EC2 do MySQL já é semeada no boot pelo Terraform).
+# LOCAL (default): TRUNCATE + recarga dos data.sql no contêiner docker.
+# REMOTO (-SshHost): na AWS, recria o database e reaplica /schema.sql e /data.sql,
+# que o user-data deixou dentro do contêiner, via SSH na EC2 do MySQL.
 
 param(
-  [Parameter(Mandatory)][ValidateSet('mono', 'micro')][string]$Target
+  [Parameter(Mandatory)][ValidateSet('mono', 'micro')][string]$Target,
+  [string]$SshHost = '',              # IP público da EC2 do MySQL (terraform output mysql_public_ip)
+  [string]$SshKey = '',               # caminho da chave privada (.pem) do key pair
+  [string]$SshUser = 'ec2-user',
+  [string]$DbName = 'petclinic'
 )
 $ErrorActionPreference = 'Stop'
 $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+
+# --- Modo REMOTO (AWS): recria o database a partir do seed persistido no contêiner ---
+if ($SshHost) {
+  if (-not $SshKey) { throw "reset-db remoto: informe -SshKey (chave .pem do key pair)" }
+  $sshBase = @('-i', $SshKey, '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=15', "$SshUser@$SshHost")
+  # 1) DROP + CREATE via stdin (evita aspas aninhadas Windows->ssh->sh)
+  "DROP DATABASE IF EXISTS $DbName; CREATE DATABASE $DbName;" |
+    & ssh @sshBase "docker exec -i mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot'"
+  if ($LASTEXITCODE -ne 0) { throw "reset-db remoto: DROP/CREATE falhou (exit $LASTEXITCODE)" }
+  # 2) schema + 3) data — arquivos já dentro do contêiner (mysql-userdata.sh)
+  foreach ($f in '/schema.sql', '/data.sql') {
+    & ssh @sshBase "docker exec mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot $DbName < $f'"
+    if ($LASTEXITCODE -ne 0) { throw "reset-db remoto: aplicar $f falhou (exit $LASTEXITCODE)" }
+  }
+  "reset-db: '$Target' resetado (remoto $SshHost — database '$DbName' recriado do seed)."
+  return
+}
+
 $root = Split-Path $PSScriptRoot -Parent
 $mono = Join-Path $root 'apps\monolith\src\main\resources\db\mysql\data.sql'
 $micro = Join-Path $root 'apps\microservices'
