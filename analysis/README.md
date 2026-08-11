@@ -5,7 +5,7 @@ testes de comparação entre as arquiteturas.
 
 ```powershell
 python analysis/analyze.py
-# com descarte de aquecimento no cenário constante (seção 3.6), ex.: 30 s:
+# com descarte de aquecimento no cenário constante (seção 3.7), ex.: 30 s:
 $env:WARMUP_SEC="30"; python analysis/analyze.py
 ```
 
@@ -16,7 +16,7 @@ duração, status e endpoint. Dele calculamos **qualquer** percentil (p95/p99),
 throughput, taxa de erro e séries temporais. O `*-summary.json` do k6 é só
 conferência rápida (estimativas pontuais).
 
-## Tratamento estatístico (seção 3.6)
+## Tratamento estatístico (seção 3.7)
 
 - **Repetições:** rode com `run-all.ps1 -Reps N`. As métricas são calculadas
   **por repetição** (`tables/per_rep.csv`) e depois agregadas em **média ± IC 95%**
@@ -53,3 +53,27 @@ latência do enlace (registrada em `baseline-latency.txt`). A comparação é
 
 Quando houver dados de cold/warm start, acrescentar um gráfico dedicado
 (barras/box do *Init Duration*: cold puro × SnapStart × warm).
+
+## Capturas na AWS
+
+O `run-aws-experiment.ps1` chama estes scripts automaticamente. Para rodá-los à
+mão (requer `aws configure` feito):
+
+```powershell
+# Uso de recursos na janela de medição -> results/resources/usage-<arq>.csv
+.\analysis\cloudwatch-capture.ps1 -Start "2026-06-01T14:00:00Z" -End "2026-06-01T14:10:00Z" `
+    -MonoInstanceId i-aaa -MysqlInstanceId i-bbb `
+    -EcsCluster tcc-petclinic-micro `
+    -EcsServices @('customers-service','vets-service','visits-service','api-gateway','config-server','discovery-server')
+
+# Cold start × warm start por subcenário -> results/coldstart/measurements.csv
+.\analysis\coldstart-capture.ps1 -Subscenario sem-otim `
+    -Functions @('tcc-petclinic-cold-getAllOwners','tcc-petclinic-cold-getOwnerById') `
+    -Reps 15 -WarmPerCold 5
+.\analysis\coldstart-capture.ps1 -Subscenario snapstart -Qualifier live `
+    -Functions @('tcc-petclinic-snap-getAllOwners','tcc-petclinic-snap-getOwnerById') `
+    -Reps 15 -WarmPerCold 5
+```
+
+O `coldstart-capture.ps1` precisa de permissão para `lambda:*` e
+`logs:FilterLogEvents`.

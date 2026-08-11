@@ -1,8 +1,5 @@
 // Cenário 1 — CARGA CONSTANTE (regime estável), Quadro 3 da metodologia.
 // Número fixo de VUs por um período determinado.
-//
-// Execução:
-//   k6 run -e TARGET=mono -e VUS=50 -e DURATION=5m load-tests/scenario-constant.js
 
 import { vuLoop } from './lib/workload.js';
 

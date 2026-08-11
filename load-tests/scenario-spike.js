@@ -6,12 +6,9 @@
 // lento — a fila cresce e a saturação aparece de verdade (latência dispara, erros
 // surgem, k6 pode acusar VUs insuficientes). É a forma adequada de achar o teto.
 //
-// Obs.: "rate" = ITERAÇÕES por segundo; cada iteração faz ~2-4 requisições
-// (lista + ficha agregada + reads/escritas eventuais). O think time é ZERO aqui
-// (run-all.ps1 passa THINK_MIN=0/THINK_MAX=0), pois o modelo aberto controla a chegada.
-//
-// Execução:
-//   k6 run -e TARGET=mono -e PEAK_RATE=300 -e THINK_MIN=0 -e THINK_MAX=0 load-tests/scenario-spike.js
+// Obs.: "rate" = ITERAÇÕES por segundo; cada iteração faz ~2-4 requisições. O
+// think time é ZERO aqui (run-all.ps1 passa THINK_MIN=0/THINK_MAX=0), pois quem
+// controla a chegada é o modelo aberto.
 
 import { vuLoop } from './lib/workload.js';
 

@@ -1,8 +1,5 @@
 // Cenário 2 — RAMPA (degradação sob crescimento gradual), Quadro 3.
 // VUs crescem progressivamente até um teto, permitindo observar a degradação.
-//
-// Execução:
-//   k6 run -e TARGET=mono -e MAX_VUS=200 load-tests/scenario-ramp.js
 
 import { vuLoop } from './lib/workload.js';
 
