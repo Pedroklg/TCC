@@ -111,7 +111,10 @@ $ArchConfig = [ordered]@{
       'aws_security_group_rule.mysql_ssh'
     )
     batteries = @(
-      @{ Target = 'micro'; Label = 'micro'; UrlOutput = 'microservices_base_url'; HealthPath = '/customer/owners' }
+      # Gate na agregação: /customer/owners responde assim que o Service Connect
+      # resolve, mas a agregação espera o Eureka propagar (~60-90 s a mais).
+      # Gatear na rota rápida contamina a primeira repetição.
+      @{ Target = 'micro'; Label = 'micro'; UrlOutput = 'microservices_base_url'; HealthPath = '/gateway/owners/1' }
     )
   }
   serverless = @{
@@ -229,8 +232,9 @@ function Invoke-Capture {
     }
   }
   catch {
-    # Captura não é crítica: avisa e segue, sem impedir o teardown.
-    Write-Warning "captura de metricas ($Arch) falhou: $($_.Exception.Message)"
+    # Captura não é crítica: avisa e segue, sem impedir o teardown. Usa o
+    # ErrorRecord inteiro porque falha de executável nativo vem com Message vazio.
+    Write-Warning "captura de metricas ($Arch) falhou: $_ | em $($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)"
   }
 }
 

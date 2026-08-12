@@ -89,7 +89,15 @@ resource "aws_ecs_task_definition" "svc" {
       protocol      = "tcp"
     }]
     environment = concat(
-      [{ name = "SPRING_PROFILES_ACTIVE", value = each.value.mysql ? "docker,mysql" : "docker" }],
+      [
+        { name = "SPRING_PROFILES_ACTIVE", value = each.value.mysql ? "docker,mysql" : "docker" },
+        # O controller de agregação (/api/gateway/**) não passa pelas rotas abaixo:
+        # ele usa um WebClient balanceado por Eureka. Registrar o hostname do
+        # Service Connect, e não o IP detectado (link-local do sidecar), é o que
+        # torna esse caminho interno alcançável.
+        { name = "EUREKA_INSTANCE_HOSTNAME", value = each.key },
+        { name = "EUREKA_INSTANCE_PREFER_IP_ADDRESS", value = "false" },
+      ],
       each.value.mysql ? [
         { name = "SPRING_DATASOURCE_URL", value = "jdbc:mysql://${aws_instance.mysql.private_ip}:3306/${var.db_name}?allowPublicKeyRetrieval=true&useSSL=false" },
         { name = "SPRING_DATASOURCE_USERNAME", value = "root" },
