@@ -15,7 +15,7 @@ param(
   [string]$Label = '',  # nome da pasta de resultados (default = Target); use p/ subcenários
                         # serverless: 'serverless-cold' e 'serverless-snap'
   [switch]$Quick,  # durações/VUs reduzidos só para validar o pipeline de coleta
-  [switch]$ResetBetweenReps,  # reseta o MySQL ao seed antes de cada rep (§3.7; só mono/micro)
+  [switch]$ResetBetweenReps,  # reseta o MySQL ao seed antes de cada rep (§3.7)
   [string]$DbSshHost = '',  # AWS: IP público da EC2 do MySQL -> reset REMOTO via SSH
   [string]$DbSshKey = ''    # AWS: chave .pem do key pair (obrigatória com -DbSshHost)
 )
@@ -35,7 +35,12 @@ if ($BaseUrl) { $envArgs += @('-e', "BASE_URL=$BaseUrl") }
 # que o pipeline de coleta funciona; os valores definitivos ficam nos defaults
 # dos próprios scripts (constante 5m/50 VUs, rampa até 200 VUs, pico 20->300 iter/s — modelo aberto).
 # O pico é modelo aberto (taxa de chegada), sem think time.
-$overrides = @{ constant = @(); ramp = @(); spike = @('-e', 'THINK_MIN=0', '-e', 'THINK_MAX=0') }
+# Pico não cria owners: a listagem cresceria e saturaria o enlace do gerador.
+$overrides = @{
+  constant = @()
+  ramp     = @()
+  spike    = @('-e', 'THINK_MIN=0', '-e', 'THINK_MAX=0', '-e', 'NEW_OWNER_RATIO=0')
+}
 if ($Quick) {
   if (-not $PSBoundParameters.ContainsKey('Reps')) { $Reps = 2 }  # validação: poucas repetições
   $overrides.constant = @('-e', 'VUS=10', '-e', 'DURATION=30s')
@@ -95,7 +100,7 @@ foreach ($s in $scenarios) {
   foreach ($rep in 1..$Reps) {
     $tag = 'rep{0:D2}' -f $rep
     Write-Host "`n=== Cenário: $s | $tag/$Reps (alvo: $Target) ===" -ForegroundColor Cyan
-    if ($ResetBetweenReps -and $Target -in @('mono', 'micro')) {
+    if ($ResetBetweenReps) {
       Write-Host "  reset do banco (baseline limpo para a repetição)..." -ForegroundColor DarkGray
       $resetArgs = @{ Target = $Target }
       if ($DbSshHost) { $resetArgs.SshHost = $DbSshHost; $resetArgs.SshKey = $DbSshKey }

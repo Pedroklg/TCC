@@ -5,7 +5,7 @@
 # que o user-data deixou dentro do contêiner, via SSH na EC2 do MySQL.
 
 param(
-  [Parameter(Mandatory)][ValidateSet('mono', 'micro')][string]$Target,
+  [Parameter(Mandatory)][ValidateSet('mono', 'micro', 'serverless')][string]$Target,
   [string]$SshHost = '',              # IP público da EC2 do MySQL (terraform output mysql_public_ip)
   [string]$SshKey = '',               # caminho da chave privada (.pem) do key pair
   [string]$SshUser = 'ec2-user',
@@ -35,6 +35,9 @@ $root = Split-Path $PSScriptRoot -Parent
 $mono = Join-Path $root 'apps\monolith\src\main\resources\db\mysql\data.sql'
 $micro = Join-Path $root 'apps\microservices'
 
+# Serverless reusa o schema e o seed do monolito.
+$localTarget = if ($Target -eq 'serverless') { 'mono' } else { $Target }
+
 $cfg = @{
   mono  = @{ container = 'petclinic-mysql'; user = 'petclinic'
              seeds = @($mono) }
@@ -44,7 +47,7 @@ $cfg = @{
                (Join-Path $micro 'spring-petclinic-vets-service\src\main\resources\db\mysql\data.sql'),
                (Join-Path $micro 'spring-petclinic-visits-service\src\main\resources\db\mysql\data.sql')
              ) }
-}[$Target]
+}[$localTarget]
 
 $c = $cfg.container
 $u = $cfg.user

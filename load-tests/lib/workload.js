@@ -28,7 +28,8 @@ export const writeLatency = new Trend('op_write_latency', true);
 
 const headers = { 'Content-Type': 'application/json' };
 const VISIT_RATIO = Number(__ENV.VISIT_RATIO || 0.2);
-const NEW_OWNER_RATIO = Number(__ENV.NEW_OWNER_RATIO || 0.05);
+// /owners não é paginado: cada owner criado infla toda listagem seguinte.
+const NEW_OWNER_RATIO = Number(__ENV.NEW_OWNER_RATIO ?? 0.01);
 const THINK_MIN = Number(__ENV.THINK_MIN ?? 0.5);
 const THINK_MAX = Number(__ENV.THINK_MAX ?? 2.0);
 
@@ -57,15 +58,21 @@ export function vuLoop() {
     owners = Array.isArray(body) ? body : (body && body.content) || [];
   } catch (e) { /* corpo inesperado */ }
 
-  // 2) Abre a FICHA de um owner aleatório — endpoint discriminante (agregação)
-  if (owners.length > 0) {
-    const ownerId = owners[Math.floor(Math.random() * owners.length)].id;
+  // 2) Abre a FICHA de um owner — endpoint discriminante (agregação).
+  // Owner sem pets não tem visitas a agregar: a operação degeneraria na consulta
+  // trivial que ela existe para contrastar.
+  const withPets = owners.filter((o) => o.pets && o.pets.length > 0);
+  check(owners, { 'listagem traz owner com pets': () => withPets.length > 0 });
+
+  if (withPets.length > 0) {
+    const ownerId = withPets[Math.floor(Math.random() * withPets.length)].id;
     const detail = http.get(`${base}${r.ownerDetail(ownerId)}`, { tags: { op: 'ownerDetail' } });
     check(detail, {
       'ownerDetail 200': (res) => res.status === 200,
-      // check de conteúdo: garante trabalho equivalente (não um 200 vazio)
+      // array vazio mascararia uma agregação que não agregou nada
       'ownerDetail traz pets': (res) => {
-        try { return Array.isArray(res.json('pets')); } catch (e) { return false; }
+        try { const p = res.json('pets'); return Array.isArray(p) && p.length > 0; }
+        catch (e) { return false; }
       },
     });
     ownerDetailLatency.add(detail.timings.duration);

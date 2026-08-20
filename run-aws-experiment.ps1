@@ -241,6 +241,9 @@ function Invoke-Capture {
 # ----------------------------------------------------------------------------- preflight
 
 function Test-Preflight {
+  if (-not $DbSshKey -and -not $Quick) {
+    throw "Rodada definitiva exige -DbSshKey: o reset do MySQL ao seed entre repeticoes (§3.7) depende dele. Use -Quick para ensaiar sem reset."
+  }
   foreach ($c in 'terraform', 'aws', 'k6') {
     if (-not (Get-Command $c -ErrorAction SilentlyContinue)) { throw "CLI '$c' nao encontrada no PATH." }
   }
@@ -297,13 +300,8 @@ try {
       Invoke-Terraform $targs
 
       # 2..3. baterias (com health-gate antes de cada uma)
-      # Reset do banco ao seed entre repetições (§3.7, só arquiteturas contínuas):
-      # requer a chave SSH do key pair; sem ela, roda SEM reset e avisa.
-      $dbIp = ''
-      if ($arch -in @('mono', 'micro')) {
-        if ($DbSshKey) { $dbIp = Get-TfOutput 'mysql_public_ip' }
-        else { Write-Warning "sem -DbSshKey: reset do MySQL entre repetições DESABILITADO (a metodologia, §3.7, prevê o reset)" }
-      }
+      # Reset do banco ao seed entre repetições (§3.7), nos três braços.
+      $dbIp = if ($DbSshKey) { Get-TfOutput 'mysql_public_ip' } else { '' }
       $winStart = Get-Date
       foreach ($b in $cfg.batteries) {
         $base = Get-TfOutput $b.UrlOutput
