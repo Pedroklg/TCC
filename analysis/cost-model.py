@@ -35,6 +35,10 @@ os.makedirs(TAB, exist_ok=True)
 
 HOURS_MONTH = 730
 
+SUBORDER = ["sem-otim", "snapstart"]
+SUBLAB = {"sem-otim": "sem otimização", "snapstart": "SnapStart"}
+SUBCOLOR = {"sem-otim": "tab:green", "snapstart": "tab:purple"}
+
 # --- Preços us-east-1 (USD), consultados em 18 jul. 2026 — RECONFERIR na execução ---
 P = {
     "ec2_c5_large_hr": 0.085,       # monolito (c5.large, 2 vCPU/4 GB)
@@ -68,6 +72,9 @@ ENV = os.environ.get
 BILLED_WARM_S = float(ENV("LAMBDA_BILLED_WARM_S", "0.05"))   # mediana cobrada (warm)
 BILLED_P95_S = float(ENV("LAMBDA_BILLED_P95_S", "0.15"))     # p95 cobrado
 COLD_FRACTION = float(ENV("COLD_FRACTION", "0.01"))          # f_fria no tráfego real
+# A f_fria medida vale para o perfil de tráfego do experimento (VUs subindo do zero).
+# Projetar custo mensal para outros volumes exige tratá-la como faixa declarada.
+COLD_FRACTION_SENS = [float(x) for x in ENV("COLD_FRACTION_SENS", "0.0001,0.01,0.10").split(",")]
 COLD_EXTRA_S = float(ENV("COLD_EXTRA_S", "2.0"))             # d_extra por invocação fria
 AVG_RESP_KB = float(ENV("AVG_RESP_KB", "5"))                 # p/ dimensão de bytes da LCU
 
@@ -146,25 +153,28 @@ def apply_measured_overrides(measured):
 
 
 def lcu_units(rps):
-    """Estimativa de LCU no período ativo: máx. entre conexões novas (pior caso,
-    1 conexão/req) e bytes processados; as dimensões de conexões ativas e de
-    regras são dominadas por essas nos cenários do experimento."""
+    """Estimativa de LCU no período ativo: máx. entre conexões novas e bytes
+    processados; as dimensões de conexões ativas e de regras são dominadas por essas
+    nos cenários do experimento. Assume 1 conexão nova por requisição — o gerador
+    reusa conexões, então é hipótese conservadora CONTRA os microsserviços."""
     new_conn = rps / 25.0
     gb_hour = rps * 3600 * AVG_RESP_KB / 1e6
     return max(new_conn, gb_hour / 1.0)
 
 
 def cost(req_month, mode="on-demand", warm_s=None, f_cold=None, extra_s=None,
-         active_frac=1.0):
+         active_frac=1.0, include_db=True):
     """Custo mensal (USD) por arquitetura. `active_frac` afeta só a LCU (as
     parcelas de tempo das contínuas independem da atividade; o serverless
-    depende apenas de req_month)."""
+    depende apenas de req_month). `include_db=False` remove o piso comum do SGBD,
+    que domina o custo por requisição em volume baixo e achata a comparação."""
     d = PRICING_MODES[mode]
     warm_s = BILLED_WARM_S if warm_s is None else warm_s
     f_cold = COLD_FRACTION if f_cold is None else f_cold
     extra_s = COLD_EXTRA_S if extra_s is None else extra_s
+    db = MYSQL_MONTH if include_db else 0.0
 
-    mono = P["ec2_c5_large_hr"] * d["ec2"] * HOURS_MONTH + MYSQL_MONTH
+    mono = P["ec2_c5_large_hr"] * d["ec2"] * HOURS_MONTH + db
 
     active_h = HOURS_MONTH * active_frac
     rps_active = req_month / (active_h * 3600) if active_h > 0 else 0.0
@@ -172,12 +182,12 @@ def cost(req_month, mode="on-demand", warm_s=None, f_cold=None, extra_s=None,
                * d["fargate"] * HOURS_MONTH
                + P["alb_hr"] * HOURS_MONTH
                + P["alb_lcu_hr"] * lcu_units(rps_active) * active_h
-               + MYSQL_MONTH)
+               + db)
 
     billed_s = warm_s + f_cold * extra_s          # d_cobr = d_quente + f_fria*d_extra
     gb_s = LAMBDA_MEM_GB * billed_s * req_month
     serverless = (req_month * (P["lambda_req"] + P["apigw_req"])
-                  + gb_s * P["lambda_gb_s"] + MYSQL_MONTH)
+                  + gb_s * P["lambda_gb_s"] + db)
     return {"Monolito": mono, "Microsserviços": fargate, "Serverless": serverless}
 
 
@@ -187,25 +197,47 @@ def breakeven(reqs, srv, cont):
     return reqs[idx[0]] if len(idx) else None
 
 
-def fig_breakeven_band(reqs):
-    """Curvas de custo com banda de sensibilidade + faixa de break-even."""
-    srv_lo = np.array([cost(r, warm_s=BILLED_WARM_S)["Serverless"] for r in reqs])
-    srv_hi = np.array([cost(r, warm_s=BILLED_P95_S)["Serverless"] for r in reqs])
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.fill_between(reqs, srv_lo, srv_hi, alpha=0.25, color="tab:green",
-                    label="Serverless (duração cobrada p50–p95)")
-    ax.plot(reqs, srv_lo, color="tab:green", linewidth=1.2)
+def subscenario_params(measured):
+    """warm/extra por subcenário, com defaults quando a captura ainda não existe
+    (SnapStart: acréscimo ~10x menor)."""
+    out = {}
+    for k in SUBORDER:
+        v = measured.get(k)
+        out[k] = v if v is not None else {
+            "warm_s": BILLED_WARM_S,
+            "extra_s": COLD_EXTRA_S if k == "sem-otim" else COLD_EXTRA_S / 10,
+        }
+    return out
 
+
+def fig_breakeven_band(reqs, subs, frac):
+    """Curvas de custo com banda de sensibilidade + faixa de break-even. Os dois
+    subcenários serverless aparecem como curvas próprias: o SnapStart é objetivo
+    específico do trabalho e não pode ficar fora da figura principal de custo."""
+    fig, ax = plt.subplots(figsize=(9, 5))
     rows = []
+    curves = {}
+    for k, v in subs.items():
+        f = frac.get(k, COLD_FRACTION)
+        lo = np.array([cost(r, warm_s=v["warm_s"], f_cold=f, extra_s=v["extra_s"])["Serverless"] for r in reqs])
+        hi = np.array([cost(r, warm_s=v.get("warm_p95_s", BILLED_P95_S), f_cold=f, extra_s=v["extra_s"])["Serverless"]
+                       for r in reqs])
+        ax.fill_between(reqs, lo, hi, alpha=0.20, color=SUBCOLOR[k])
+        ax.plot(reqs, lo, color=SUBCOLOR[k], linewidth=1.4,
+                label=f"Serverless — {SUBLAB[k]} (p50–p95)")
+        curves[k] = (lo, hi)
+
     for arch, color in [("Monolito", "tab:blue"), ("Microsserviços", "tab:orange")]:
         for mode, ls in [("on-demand", "-"), ("ri-3y", "--")]:
             c = np.array([cost(r, mode=mode)[arch] for r in reqs])
             ax.plot(reqs, c, ls, color=color, linewidth=1.6,
                     label=f"{arch} ({mode})")
-            for d_label, srv in [("p50", srv_lo), ("p95", srv_hi)]:
-                be = breakeven(reqs, srv, c)
-                rows.append({"arquitetura": arch, "preco": mode, "duracao": d_label,
-                             "breakeven_req_mes": None if be is None else round(be)})
+            for k, (lo, hi) in curves.items():
+                for d_label, srv in [("p50", lo), ("p95", hi)]:
+                    be = breakeven(reqs, srv, c)
+                    rows.append({"subcenario": SUBLAB[k], "arquitetura": arch, "preco": mode,
+                                 "duracao": d_label,
+                                 "breakeven_req_mes": None if be is None else round(be)})
     ax.set_xscale("log")
     ax.set_xlabel("Requisições por mês")
     ax.set_ylabel("Custo mensal estimado (USD)")
@@ -222,15 +254,20 @@ def fig_breakeven_band(reqs):
 
 
 def fig_per_million(reqs):
+    """Com e sem o piso comum do SGBD: incluído, ele domina em volume baixo e faz as
+    três curvas coincidirem, escondendo a diferença entre as arquiteturas."""
     fig, ax = plt.subplots(figsize=(9, 5))
-    for arch in ["Monolito", "Microsserviços", "Serverless"]:
-        c = np.array([cost(r)[arch] / r * 1e6 for r in reqs])
-        ax.plot(reqs, c, label=arch, linewidth=1.8)
+    for arch, color in [("Monolito", "tab:blue"), ("Microsserviços", "tab:orange"),
+                        ("Serverless", "tab:green")]:
+        tot = np.array([cost(r)[arch] / r * 1e6 for r in reqs])
+        exd = np.array([cost(r, include_db=False)[arch] / r * 1e6 for r in reqs])
+        ax.plot(reqs, tot, "-", color=color, linewidth=1.8, label=f"{arch} (com SGBD)")
+        ax.plot(reqs, exd, ":", color=color, linewidth=1.4, label=f"{arch} (sem SGBD)")
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("Requisições por mês")
     ax.set_ylabel("Custo por milhão de requisições (USD)")
-    ax.set_title("Custo por requisição × volume (inclui custo comum do SGBD)")
-    ax.legend(); ax.grid(alpha=0.3, which="both")
+    ax.set_title("Custo por requisição × volume")
+    ax.legend(fontsize=8); ax.grid(alpha=0.3, which="both")
     fig.tight_layout()
     fig.savefig(os.path.join(FIG, "cost_per_million.png"), dpi=150)
     plt.close(fig)
@@ -262,19 +299,12 @@ def fig_decision_map():
     plt.close(fig)
 
 
-def fig_breakdown(measured, frac):
+def fig_breakdown(subs, frac):
     """Decomposição do custo serverless por milhão de req, cold × snap."""
-    subs = {"sem-otim": measured.get("sem-otim"),
-            "snapstart": measured.get("snapstart")}
-    # defaults se a captura ainda não existe (SnapStart: acréscimo ~10× menor)
-    for k, v in subs.items():
-        if v is None:
-            subs[k] = {"warm_s": BILLED_WARM_S,
-                       "extra_s": COLD_EXTRA_S if k == "sem-otim" else COLD_EXTRA_S / 10}
     labels, req_c, gw_c, gbs_warm, gbs_cold = [], [], [], [], []
     for k, v in subs.items():
         f_sub = frac.get(k, COLD_FRACTION)  # f_fria medida por subcenário, se houver
-        labels.append({"sem-otim": "Sem otimização", "snapstart": "SnapStart"}[k])
+        labels.append(SUBLAB[k].capitalize())
         req_c.append(0.20)
         gw_c.append(1.00)
         gbs_warm.append(LAMBDA_MEM_GB * v["warm_s"] * P["lambda_gb_s"] * 1e6)
@@ -295,6 +325,27 @@ def fig_breakdown(measured, frac):
     fig.tight_layout()
     fig.savefig(os.path.join(FIG, "cost_breakdown_serverless.png"), dpi=150)
     plt.close(fig)
+
+
+def table_breakeven_sensitivity(reqs, subs, frac):
+    """Break-even em função da f_fria: a medida corresponde ao perfil de tráfego do
+    experimento e não se transporta para volumes arbitrários."""
+    rows = []
+    for k, v in subs.items():
+        vals = sorted(set(COLD_FRACTION_SENS) | ({frac[k]} if k in frac else set()))
+        for f in vals:
+            srv = np.array([cost(r, warm_s=v["warm_s"], f_cold=f, extra_s=v["extra_s"])["Serverless"]
+                            for r in reqs])
+            for arch in ("Monolito", "Microsserviços"):
+                for mode in PRICING_MODES:
+                    be = breakeven(reqs, srv, np.array([cost(r, mode=mode)[arch] for r in reqs]))
+                    rows.append({"subcenario": SUBLAB[k], "f_fria": f,
+                                 "medida": bool(k in frac and abs(f - frac[k]) < 1e-12),
+                                 "arquitetura": arch, "preco": mode,
+                                 "breakeven_req_mes": None if be is None else round(be)})
+    df = pd.DataFrame(rows)
+    df.to_csv(os.path.join(TAB, "cost_breakeven_sensitivity.csv"), index=False)
+    return df
 
 
 def table_efficiency():
@@ -332,10 +383,12 @@ def main():
     frac = apply_measured_overrides(measured)
     reqs = np.logspace(5, 9, 300)  # 100 mil a 1 bilhão de req/mês
 
-    be = fig_breakeven_band(reqs)
+    subs = subscenario_params(measured)
+    be = fig_breakeven_band(reqs, subs, frac)
+    sens = table_breakeven_sensitivity(reqs, subs, frac)
     fig_per_million(reqs)
     fig_decision_map()
-    fig_breakdown(measured, frac)
+    fig_breakdown(subs, frac)
     eff = table_efficiency()
 
     # tabela por perfil (volume × fração ativa)
@@ -359,13 +412,17 @@ def main():
     print(tab.to_string(index=False))
     print("\n=== Break-even serverless × contínuas (FAIXA de sensibilidade) ===")
     print(be.to_string(index=False))
+    print("\n=== Break-even × f_fria (a medida vale para o perfil do experimento) ===")
+    print(sens.to_string(index=False))
     if eff is not None:
         print("\n=== Custo-eficiência (USD/mês por req/s sustentado) ===")
         print(eff.to_string(index=False))
-    print("\nNotas: MySQL sempre ligado é custo COMUM às três (piso fixo). "
-          "Fatores de desconto (ri-1y/ri-3y) são placeholders — confirmar prazo/forma "
-          "de pagamento na data da análise. Duração cobrada: usar Billed Duration "
-          "medida (coldstart-capture) antes do Cap. 4.")
+    print("\nNotas: MySQL sempre ligado é custo COMUM às três (piso fixo) — não desloca o "
+          "break-even nem o mapa de decisão, mas domina o custo por requisição em volume "
+          "baixo. A tabela por perfil e o mapa de decisão usam o subcenário sem otimização "
+          "(caso conservador). Fatores de desconto (ri-1y/ri-3y) são placeholders — "
+          "confirmar prazo/forma de pagamento na data da análise. Duração cobrada: usar "
+          "Billed Duration medida (coldstart-capture) antes do Cap. 4.")
     print(f"Figuras em {FIG}/ | Tabelas em {TAB}/")
 
 
