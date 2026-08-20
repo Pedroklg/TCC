@@ -48,6 +48,12 @@ resource "aws_ecs_cluster" "micro" {
   service_connect_defaults {
     namespace = aws_service_discovery_http_namespace.micro.arn
   }
+  # Necessário para separar, por contêiner, o consumo da aplicação do consumo do
+  # proxy do Service Connect: as métricas AWS/ECS só chegam ao nível da tarefa.
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
 }
 
 # Papel de execução das tarefas (puxar imagem + logs).

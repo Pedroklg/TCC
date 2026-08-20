@@ -6,8 +6,9 @@ logo, a arquitetura mais econômica depende do perfil de tráfego. O modelo prod
   1. custo mensal × volume, com banda de sensibilidade e break-even como FAIXA
      (duração cobrada p50/p95 × sob demanda vs descontos por compromisso);
   2. custo por milhão de requisições (curva — depende do volume pela parcela fixa);
-  3. custo-eficiência: custo mensal por req/s sustentado no ponto de saturação
-     (monolito e microsserviços; lê analysis/tables/saturation.csv se existir);
+  3. custo-eficiência: custo mensal por req/s sustentado no ponto de saturação, nas
+     três arquiteturas (lê analysis/tables/saturation.csv se existir), e a comparação
+     entre paridade de capacidade e paridade de custo;
   4. mapa de decisão: taxa ativa × fração ativa do mês -> arquitetura mais barata;
   5. decomposição do custo serverless por milhão de requisições (cold × snap).
 
@@ -348,8 +349,27 @@ def table_breakeven_sensitivity(reqs, subs, frac):
     return df
 
 
-def table_efficiency():
-    """Custo mensal por req/s sustentado (E_a = C_a / X*_a) — usa saturation.csv."""
+def table_capacity_vs_cost():
+    """Paridade de capacidade nominal não é paridade de custo: fixar 2 vCPU/4 GB nos
+    dois lados dá aos microsserviços um orçamento financeiro maior. Exclui o SGBD, que
+    é comum, para isolar a parcela de computação."""
+    mono = P["ec2_c5_large_hr"] * HOURS_MONTH
+    farg = (FARGATE_VCPU * P["fargate_vcpu_hr"] + FARGATE_GB * P["fargate_gb_hr"]) * HOURS_MONTH
+    alb = P["alb_hr"] * HOURS_MONTH
+    rows = [("Monolito (c5.large)", "2 vCPU / 4 GB", mono),
+            ("Microsserviços (Fargate)", "2 vCPU / 4 GB", farg),
+            ("Microsserviços + ALB", "2 vCPU / 4 GB + balanceador", farg + alb)]
+    df = pd.DataFrame([{"arquitetura": a, "capacidade_contratada": c,
+                        "usd_mes": round(v, 2), "vs_monolito_pct": round(100 * (v / mono - 1), 1)}
+                       for a, c, v in rows])
+    df.to_csv(os.path.join(TAB, "capacity_vs_cost.csv"), index=False)
+    return df
+
+
+def table_efficiency(subs, frac):
+    """Custo mensal por req/s sustentado (E_a = C_a / X*_a) — usa saturation.csv.
+    Inclui o serverless: sem capacidade contratada, o denominador é a vazão sustentada
+    no pico e o numerador, o custo do volume que essa vazão implica em um mês."""
     path = os.path.join(TAB, "saturation.csv")
     if not os.path.exists(path):
         print("[custo-eficiência] saturation.csv ainda não existe — pulado "
@@ -362,15 +382,26 @@ def table_efficiency():
         return None
     xstar = sat.groupby("target")[col].max()
     base = cost(1e6)  # parcela fixa domina; volume irrelevante p/ contínuas
-    mapping = {"mono": "Monolito", "micro": "Microsserviços"}
     rows = []
-    for tgt, arch in mapping.items():
-        match = [t for t in xstar.index if str(t).startswith(tgt)]
+    for tgt, arch in (("mono", "Monolito"), ("micro", "Microsserviços")):
+        match = [t for t in xstar.index if str(t) == tgt]
         if match:
             x = float(xstar[match[0]])
             rows.append({"arquitetura": arch, "throughput_sustentado_rps": round(x, 1),
                          "custo_mensal_usd": round(base[arch], 2),
                          "usd_mes_por_rps": round(base[arch] / x, 2) if x else np.nan})
+    for tgt, k in (("serverless-cold", "sem-otim"), ("serverless-snap", "snapstart")):
+        if tgt not in xstar.index or k not in subs:
+            continue
+        x = float(xstar[tgt])
+        if not x or np.isnan(x):
+            continue
+        v = x * 3600 * HOURS_MONTH
+        c = cost(v, warm_s=subs[k]["warm_s"], f_cold=frac.get(k, COLD_FRACTION),
+                 extra_s=subs[k]["extra_s"])["Serverless"]
+        rows.append({"arquitetura": f"Serverless ({SUBLAB[k]})",
+                     "throughput_sustentado_rps": round(x, 1),
+                     "custo_mensal_usd": round(c, 2), "usd_mes_por_rps": round(c / x, 2)})
     if not rows:
         return None
     eff = pd.DataFrame(rows)
@@ -389,7 +420,8 @@ def main():
     fig_per_million(reqs)
     fig_decision_map()
     fig_breakdown(subs, frac)
-    eff = table_efficiency()
+    eff = table_efficiency(subs, frac)
+    cap = table_capacity_vs_cost()
 
     # tabela por perfil (volume × fração ativa)
     profiles = [
@@ -414,6 +446,8 @@ def main():
     print(be.to_string(index=False))
     print("\n=== Break-even × f_fria (a medida vale para o perfil do experimento) ===")
     print(sens.to_string(index=False))
+    print("\n=== Paridade de capacidade × paridade de custo (computação, sem SGBD) ===")
+    print(cap.to_string(index=False))
     if eff is not None:
         print("\n=== Custo-eficiência (USD/mês por req/s sustentado) ===")
         print(eff.to_string(index=False))

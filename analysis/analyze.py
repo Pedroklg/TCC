@@ -66,6 +66,9 @@ ALLOC_VCPU_GB = {
     ("Microsserviços", "visits-service"): (0.25, 0.5),
     ("Microsserviços", "api-gateway"): (0.5, 1.0),
 }
+MICRO_CPU_UNITS = 2048           # soma das 6 tarefas (2 vCPU)
+LAMBDA_MEM_MB = 1769             # ≈ 1 vCPU por invocação
+PLATFORM_SERVICES = {"config-server", "discovery-server", "api-gateway"}
 
 
 def parse_raw(path):
@@ -513,6 +516,78 @@ def resource_usage():
     return agg
 
 
+def platform_overhead():
+    """Divide o consumo das tarefas entre lógica de negócio, plataforma e proxy do
+    Service Connect (containers-micro.csv). O proxy divide o orçamento da tarefa com a
+    aplicação: sem separá-lo, o custo da malha de comunicação entra no número da
+    aplicação e a equivalência do Quadro 2 fica sobrestimada."""
+    path = os.path.join(RESULTS, "resources", "containers-micro.csv")
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_csv(path)
+    except (OSError, ValueError):
+        return None
+    if "ContainerName" not in df.columns:
+        return None
+
+    def role(n):
+        n = str(n)
+        if "service-connect" in n or "envoy" in n.lower():
+            return "proxy (Service Connect)"
+        return "plataforma" if n in PLATFORM_SERVICES else "lógica de negócio"
+
+    df["papel"] = df["ContainerName"].map(role)
+    for c in ("cpu_units_avg", "cpu_units_max", "mem_mb_avg", "mem_mb_max"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    agg = df.groupby("papel").agg(
+        cpu_units_med=("cpu_units_avg", "sum"), cpu_units_pico=("cpu_units_max", "sum"),
+        mem_mb_med=("mem_mb_avg", "sum"), mem_mb_pico=("mem_mb_max", "sum"),
+    ).reset_index()
+    tot = agg["cpu_units_med"].sum()
+    agg["pct_do_consumo"] = 100 * agg["cpu_units_med"] / tot if tot else np.nan
+    agg["pct_do_orcamento"] = 100 * agg["cpu_units_med"] / MICRO_CPU_UNITS
+    agg.to_csv(os.path.join(TAB, "platform_overhead.csv"), index=False)
+    return agg
+
+
+def normalized_efficiency(summary, res, scenario="constant"):
+    """Requisições por vCPU efetivamente consumida. É o denominador comum entre
+    capacidade contratada e capacidade elástica: no serverless não há capacidade total,
+    mas há consumo medido (Billed Duration × memória/1769)."""
+    rows = []
+    s = summary[summary.scenario == scenario]
+    if res is not None:
+        for arch, tgt in (("Monolito", "mono"), ("Microsserviços", "micro")):
+            r, t = res[res.architecture == arch], s[s.target == tgt]
+            if r.empty or t.empty:
+                continue
+            vcpu = float(r["vcpu_media"].iloc[0])
+            thr = float(t["throughput_rps_mean"].iloc[0])
+            if vcpu and not np.isnan(vcpu):
+                rows.append({"arquitetura": arch, "vcpu_consumida": round(vcpu, 3),
+                             "throughput_rps": round(thr, 1),
+                             "req_por_vcpu_s": round(thr / vcpu, 1)})
+    cs = os.path.join(TAB, "coldstart_summary.csv")
+    if os.path.exists(cs):
+        try:
+            for _, r in pd.read_csv(cs).iterrows():
+                b = r.get("billed_warm_med_ms", np.nan)
+                if pd.notna(b) and b > 0:
+                    vcpu_s = (b / 1000.0) * (LAMBDA_MEM_MB / 1769.0)
+                    rows.append({"arquitetura": f"Serverless ({r['subscenario']})",
+                                 "vcpu_consumida": np.nan, "throughput_rps": np.nan,
+                                 "req_por_vcpu_s": round(1.0 / vcpu_s, 1)})
+        except (OSError, ValueError, KeyError):
+            pass
+    if not rows:
+        return None
+    eff = pd.DataFrame(rows)
+    eff.to_csv(os.path.join(TAB, "normalized_efficiency.csv"), index=False)
+    return eff
+
+
 def _read_csv(path):
     if not os.path.exists(path):
         return None
@@ -602,6 +677,8 @@ def main():
     od_per_rep, od = owner_detail_comparison(alldf)
     tests = stat_tests(per_rep, od_per_rep)
     warm = warmup_sensitivity(alldf)
+    over = platform_overhead()
+    neff = normalized_efficiency(summary, res)
 
     cond = run_conditions()
 
@@ -628,6 +705,12 @@ def main():
     if warm is not None:
         print("\n=== Sensibilidade ao descarte de aquecimento (serverless, constante) ===")
         print(warm.round(1).to_string(index=False))
+    if over is not None:
+        print("\n=== Orçamento das tarefas: negócio × plataforma × proxy ===")
+        print(over.round(1).to_string(index=False))
+    if neff is not None:
+        print("\n=== Eficiência normalizada (req por vCPU-segundo consumida) ===")
+        print(neff.round(2).to_string(index=False))
     print("\n=== Testes estatísticos ===\n" + tests)
     print(f"Figuras em {FIG}/ | Tabelas em {TAB}/")
 

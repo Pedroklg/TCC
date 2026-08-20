@@ -67,6 +67,38 @@ foreach ($svc in $EcsServices) {
   Add 'Microsserviços' $svc $c $m
 }
 
+# Consumo POR CONTÊINER (Container Insights): as métricas AWS/ECS param no nível da
+# tarefa, e o proxy do Service Connect divide com a aplicação o mesmo orçamento de
+# CPU/memória. CpuUtilized vem em unidades de CPU (1024 = 1 vCPU) e MemoryUtilized em MB.
+if ($EcsCluster) {
+  $lg = "/aws/ecs/containerinsights/$EcsCluster/performance"
+  $qs = 'filter Type = "Container" | stats avg(CpuUtilized) as cpu_units_avg, ' +
+  'max(CpuUtilized) as cpu_units_max, avg(MemoryUtilized) as mem_mb_avg, ' +
+  'max(MemoryUtilized) as mem_mb_max by ContainerName'
+  $qid = aws logs start-query --log-group-name $lg --region $Region `
+    --start-time ([DateTimeOffset]::Parse($Start).ToUnixTimeSeconds()) `
+    --end-time ([DateTimeOffset]::Parse($End).ToUnixTimeSeconds()) `
+    --query-string $qs --query queryId --output text 2>$null
+  if ($qid) {
+    $res = $null
+    foreach ($i in 1..30) {
+      Start-Sleep -Seconds 2
+      $r = aws logs get-query-results --query-id $qid --region $Region --output json 2>$null | ConvertFrom-Json
+      if ($r.status -eq 'Complete') { $res = $r.results; break }
+    }
+    if ($res) {
+      $ctrCsv = Join-Path (Split-Path $OutCsv) 'containers-micro.csv'
+      $res | ForEach-Object {
+        $o = [ordered]@{}
+        $_ | ForEach-Object { $o[$_.field] = $_.value }
+        [pscustomobject]$o
+      } | Export-Csv -Path $ctrCsv -NoTypeInformation -Encoding utf8
+      "Consumo por conteiner salvo em $ctrCsv"
+    }
+    else { Write-Warning "Container Insights: consulta nao concluiu (metricas podem levar minutos apos o start)" }
+  }
+}
+
 # Serverless (Lambda): duração média (proxy de uso de CPU); memória usada nos logs.
 foreach ($fn in $LambdaFunctions) {
   $d = Stat 'AWS/Lambda' 'Duration' 'FunctionName' $fn
