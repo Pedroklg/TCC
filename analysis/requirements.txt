@@ -1,0 +1,6 @@
+# Versões usadas na execução dos experimentos (Python 3.14.5).
+# Instalação: python -m pip install -r analysis/requirements.txt
+pandas==3.0.3
+numpy==2.4.6
+scipy==1.17.1
+matplotlib==3.10.9

@@ -282,6 +282,12 @@ Start-Transcript -Path (Join-Path $logDir "$stamp.log") | Out-Null
 $summary = @()
 try {
   Test-Preflight
+  @{
+    timestamp = $stamp; reps = $Reps; quick = [bool]$Quick; only = $Only
+    terraform = ((terraform version) -split "`n")[0]
+    aws       = (aws --version 2>&1 | Out-String).Trim()
+    k6        = (k6 version)
+  } | ConvertTo-Json | Out-File (Join-Path $logDir "$stamp-versions.json") -Encoding utf8
   Invoke-Terraform @('init', '-input=false')
 
   $bTimeout = if ($Quick) { 15 } else { $BatteryTimeoutMin }
