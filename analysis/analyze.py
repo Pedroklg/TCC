@@ -73,16 +73,21 @@ def load_all():
         m = re.match(r"(constant|ramp|spike)(?:-rep(\d+))?-raw\.json$", fname)
         if not m:
             continue
+        run = os.path.basename(os.path.dirname(raw))
         target = os.path.basename(os.path.dirname(os.path.dirname(raw)))
         scenario, rep = m.group(1), int(m.group(2) or 1)
         df = parse_raw(raw)
         if df.empty:
             continue
-        df["target"], df["scenario"], df["rep"] = target, scenario, rep
+        df["target"], df["run"], df["scenario"], df["rep"] = target, run, scenario, rep
         frames.append(df)
     if not frames:
         sys.exit(f"Nenhum *-raw.json encontrado em {RESULTS}/<alvo>/<ts>/")
     alldf = pd.concat(frames, ignore_index=True)
+    for t, n in alldf.groupby("target")["run"].nunique().items():
+        if n > 1:
+            print(f"[aviso] '{t}' tem {n} execuções em {RESULTS}/ — cada (execução, repetição) "
+                  f"conta como uma repetição distinta.", file=sys.stderr)
     alldf["failed"] = ~alldf["status"].astype(str).str.match(r"[23]..").fillna(False)
     return alldf
 
@@ -93,7 +98,9 @@ def order_targets(ts):
 
 def per_rep_metrics(alldf):
     rows = []
-    for (t, s, rep), g in alldf.groupby(["target", "scenario", "rep"]):
+    # 'run' entra na chave: repetições homônimas de execuções distintas não podem
+    # ser fundidas — o intervalo entre elas destruiria o throughput.
+    for (t, s, run, rep), g in alldf.groupby(["target", "scenario", "run", "rep"]):
         if s == "constant" and WARMUP_SEC > 0 and t in WARMUP_TARGETS:
             cut = g["time"].min() + pd.Timedelta(seconds=WARMUP_SEC)
             g = g[g["time"] >= cut]
@@ -102,7 +109,7 @@ def per_rep_metrics(alldf):
         dur = g["duration_ms"].to_numpy()
         span = (g["time"].max() - g["time"].min()).total_seconds()
         rows.append({
-            "target": t, "scenario": s, "rep": rep, "n": len(g),
+            "target": t, "scenario": s, "run": run, "rep": rep, "n": len(g),
             "throughput_rps": len(g) / span if span > 0 else np.nan,
             "error_rate_pct": 100 * g["failed"].mean(),
             "mean_ms": dur.mean(), "median_ms": float(np.median(dur)),
@@ -190,7 +197,7 @@ def timeseries(alldf):
         fig, ax = plt.subplots(figsize=(9, 5))
         for t in targets:
             d = sub[sub.target == t].copy()
-            d["sec"] = d.groupby("rep")["time"].transform(lambda x: (x - x.min()).dt.total_seconds()).astype(int)
+            d["sec"] = d.groupby(["run", "rep"])["time"].transform(lambda x: (x - x.min()).dt.total_seconds()).astype(int)
             g = d.groupby("sec")["duration_ms"].quantile(0.95)
             ax.plot(g.index, g.values, label=LABEL[t], linewidth=1.5)
         ax.set_xlabel("Tempo do teste (s)"); ax.set_ylabel("p95 do tempo de resposta (ms)")
@@ -247,9 +254,9 @@ def owner_detail_comparison(alldf):
     if sub.empty:
         return None
     rows = []
-    for (t, s, rep), g in sub.groupby(["target", "scenario", "rep"]):
+    for (t, s, run, rep), g in sub.groupby(["target", "scenario", "run", "rep"]):
         d = g["duration_ms"].to_numpy()
-        rows.append({"target": t, "scenario": s, "rep": rep,
+        rows.append({"target": t, "scenario": s, "run": run, "rep": rep,
                      "median_ms": float(np.median(d)), "p95_ms": float(np.percentile(d, 95))})
     pr = pd.DataFrame(rows)
     pr.to_csv(os.path.join(TAB, "owner_detail_per_rep.csv"), index=False)
@@ -293,8 +300,8 @@ def scalability(alldf):
         fig, ax = plt.subplots(figsize=(9, 5))
         for t in targets:
             d = sub[sub.target == t].copy()
-            reps = max(d["rep"].nunique(), 1)
-            d["sec"] = d.groupby("rep")["time"].transform(lambda x: (x - x.min()).dt.total_seconds()).astype(int)
+            reps = max(d.groupby(["run", "rep"]).ngroups, 1)
+            d["sec"] = d.groupby(["run", "rep"])["time"].transform(lambda x: (x - x.min()).dt.total_seconds()).astype(int)
             g = d.groupby("sec")
             thr = g.size() / reps  # throughput médio por segundo (entre repetições)
             err = g["failed"].mean().reindex(thr.index).fillna(0)
@@ -354,6 +361,76 @@ def resource_usage():
     return agg
 
 
+def _read_csv(path):
+    if not os.path.exists(path):
+        return None
+    try:
+        return pd.read_csv(path)
+    except (OSError, ValueError):
+        return None
+
+
+def run_conditions():
+    """Condições de execução por repetição (§4.1): iterações descartadas, VUs usados,
+    deriva de payload, RTT de base e CPU do gerador. Sustenta a afirmação da §3.4 de
+    que o cliente não se tornou o fator limitante."""
+    rows = []
+    for rundir in glob.glob(os.path.join(RESULTS, "*", "*")):
+        if not os.path.isdir(rundir):
+            continue
+        target = os.path.basename(os.path.dirname(rundir))
+        rtt = _read_csv(os.path.join(rundir, "baseline-latency.csv"))
+        cpu = _read_csv(os.path.join(rundir, "client-cpu.csv"))
+        for summ in glob.glob(os.path.join(rundir, "*-summary.json")):
+            m = re.match(r"(constant|ramp|spike)-rep(\d+)-summary\.json$", os.path.basename(summ))
+            if not m:
+                continue
+            scenario, rep = m.group(1), int(m.group(2))
+            try:
+                with open(summ, encoding="utf-8") as f:
+                    mt = json.load(f).get("metrics", {})
+            except (OSError, ValueError):
+                continue
+            reqs = mt.get("http_reqs", {}).get("count", 0)
+            row = {
+                "target": target, "scenario": scenario,
+                "run": os.path.basename(rundir), "rep": rep,
+                "iterations": mt.get("iterations", {}).get("count", 0),
+                "http_reqs": reqs,
+                # o k6 só emite a métrica quando houve descarte
+                "dropped_iterations": mt.get("dropped_iterations", {}).get("count", 0),
+                "vus_max": mt.get("vus_max", {}).get("max", np.nan),
+                "kb_per_req": (mt.get("data_received", {}).get("count", 0) / reqs / 1024) if reqs else np.nan,
+                "rtt_min_ms": np.nan, "client_cpu_avg_pct": np.nan, "client_cpu_max_pct": np.nan,
+            }
+            if rtt is not None and {"scenario", "rep"} <= set(rtt.columns):
+                r = rtt[(rtt.scenario == scenario) & (rtt.rep == rep)]["min_rtt_ms"].dropna()
+                if len(r):
+                    row["rtt_min_ms"] = float(r.iloc[0])
+            if cpu is not None and {"scenario", "rep"} <= set(cpu.columns):
+                c = cpu[(cpu.scenario == scenario) & (cpu.rep == rep)]["cpu_pct"].dropna()
+                if len(c):
+                    row["client_cpu_avg_pct"] = float(c.mean())
+                    row["client_cpu_max_pct"] = float(c.max())
+            rows.append(row)
+    if not rows:
+        return None
+    cond = pd.DataFrame(rows).sort_values(["target", "scenario", "run", "rep"])
+    cond.to_csv(os.path.join(TAB, "run_conditions.csv"), index=False)
+
+    agg = cond.groupby(["target", "scenario"]).agg(
+        reps=("rep", "size"),
+        iter_descartadas=("dropped_iterations", "sum"),
+        vus_max=("vus_max", "max"),
+        kb_por_req=("kb_per_req", "mean"),
+        rtt_min_ms=("rtt_min_ms", "median"),
+        cpu_cliente_med=("client_cpu_avg_pct", "mean"),
+        cpu_cliente_max=("client_cpu_max_pct", "max"),
+    ).reset_index()
+    agg.to_csv(os.path.join(TAB, "run_conditions_summary.csv"), index=False)
+    return agg
+
+
 def main():
     alldf = load_all()
     per_rep = per_rep_metrics(alldf)
@@ -372,7 +449,12 @@ def main():
     od = owner_detail_comparison(alldf)
     tests = stat_tests(per_rep)
 
+    cond = run_conditions()
+
     pd.set_option("display.width", 160, "display.max_columns", 30)
+    if cond is not None:
+        print("\n=== Condições de execução (§4.1) ===")
+        print(cond.round(2).to_string(index=False))
     show = summary[["target", "scenario", "reps", "throughput_rps_mean",
                     "error_rate_pct_mean", "p95_ms_mean", "p99_ms_mean"]].round(2)
     print("\n=== Resumo por arquitetura × cenário (TODAS as requisições) ===")

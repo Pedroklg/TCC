@@ -59,33 +59,48 @@ if ($BaseUrl) {
   $probeHost = $u.Host
   $probePort = $u.Port
 }
-Write-Host "Medindo latência de base até ${probeHost}:${probePort} ..." -ForegroundColor Cyan
-$rtts = @()
-foreach ($i in 1..5) {
-  $c = [Net.Sockets.TcpClient]::new()
-  $sw = [Diagnostics.Stopwatch]::StartNew()
-  try {
-    if ($c.ConnectAsync($probeHost, $probePort).Wait(5000)) {
-      $sw.Stop()
-      $rtts += $sw.Elapsed.TotalMilliseconds
+# Medido por repetição, não por bateria: os três braços rodam em horários
+# distintos ao longo da sessão, e o enlace vira covariável registrada.
+function Measure-BaselineRtt {
+  $rtts = @()
+  foreach ($i in 1..5) {
+    $c = [Net.Sockets.TcpClient]::new()
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    try {
+      if ($c.ConnectAsync($probeHost, $probePort).Wait(5000)) {
+        $sw.Stop()
+        $rtts += $sw.Elapsed.TotalMilliseconds
+      }
+    }
+    catch { }
+    finally { $c.Dispose() }
+  }
+  if (-not $rtts.Count) { return $null }
+  # min é menos sensível a jitter e ao DNS da primeira conexão que a média
+  return [pscustomobject]@{
+    avg_rtt_ms = [math]::Round(($rtts | Measure-Object -Average).Average, 2)
+    min_rtt_ms = [math]::Round(($rtts | Measure-Object -Minimum).Minimum, 2)
+  }
+}
+
+# CPU do gerador (§3.4): amostrada em segundo plano durante cada bateria para
+# confirmar que o cliente não se tornou o fator limitante.
+function Start-CpuSampler {
+  param([string]$Path, [string]$Scenario, [string]$Rep)
+  Start-Job -ArgumentList $Path, $Scenario, $Rep -ScriptBlock {
+    param($p, $s, $r)
+    while ($true) {
+      $v = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime
+      "$s,$r,$v" | Add-Content -Path $p
+      Start-Sleep -Seconds 5
     }
   }
-  catch { }
-  finally { $c.Dispose() }
 }
-$baseFile = Join-Path $outDir 'baseline-latency.txt'
-if ($rtts.Count -gt 0) {
-  # min é menos sensível a jitter e ao DNS da primeira conexão que a média
-  $avg = [math]::Round(($rtts | Measure-Object -Average).Average, 2)
-  $min = [math]::Round(($rtts | Measure-Object -Minimum).Minimum, 2)
-  "host=$probeHost port=$probePort n=$($rtts.Count) avg_rtt_ms=$avg min_rtt_ms=$min" |
-    Out-File $baseFile -Encoding utf8
-  Write-Host "  RTT TCP: media $avg ms | min $min ms" -ForegroundColor Green
-}
-else {
-  "host=$probeHost port=$probePort rtt=indisponivel" | Out-File $baseFile -Encoding utf8
-  Write-Host "  (sonda TCP indisponivel - registrado mesmo assim)" -ForegroundColor Yellow
-}
+
+$rttCsv = Join-Path $outDir 'baseline-latency.csv'
+"scenario,rep,host,port,avg_rtt_ms,min_rtt_ms" | Out-File $rttCsv -Encoding utf8
+$cpuCsv = Join-Path $outDir 'client-cpu.csv'
+"scenario,rep,cpu_pct" | Out-File $cpuCsv -Encoding utf8
 
 # Metadados do run (reprodutibilidade). -Encoding utf8: o default do PS 5.1 é
 # UTF-16LE, ilegível para leitores JSON.
@@ -106,6 +121,17 @@ foreach ($s in $scenarios) {
       if ($DbSshHost) { $resetArgs.SshHost = $DbSshHost; $resetArgs.SshKey = $DbSshKey }
       & (Join-Path $root 'infra\reset-db.ps1') @resetArgs | Out-Null
     }
+    $rtt = Measure-BaselineRtt
+    if ($rtt) {
+      "$s,$rep,$probeHost,$probePort,$($rtt.avg_rtt_ms),$($rtt.min_rtt_ms)" | Out-File $rttCsv -Append -Encoding utf8
+      Write-Host "  RTT TCP: media $($rtt.avg_rtt_ms) ms | min $($rtt.min_rtt_ms) ms" -ForegroundColor DarkGray
+    }
+    else {
+      "$s,$rep,$probeHost,$probePort,," | Out-File $rttCsv -Append -Encoding utf8
+      Write-Host "  (sonda TCP indisponivel)" -ForegroundColor Yellow
+    }
+    $cpuJob = Start-CpuSampler -Path $cpuCsv -Scenario $s -Rep $rep
+
     $summary = Join-Path $outDir "$s-$tag-summary.json"
     $raw = Join-Path $outDir "$s-$tag-raw.json"
     # k6 emite avisos (ex.: "Insufficient VUs") em stderr; no PowerShell 5.1 isso vira
@@ -120,6 +146,8 @@ foreach ($s in $scenarios) {
       (Join-Path $PSScriptRoot "scenario-$s.js")
     $code = $LASTEXITCODE
     $ErrorActionPreference = $prevEAP
+    Stop-Job $cpuJob -ErrorAction SilentlyContinue
+    Remove-Job $cpuJob -Force -ErrorAction SilentlyContinue
     if ($code -ne 0) { Write-Warning "k6 saiu com código $code em $s/$tag (limiar não atendido?); seguindo." }
   }
 }
