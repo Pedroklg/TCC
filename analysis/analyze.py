@@ -35,6 +35,20 @@ SCNLAB = {"constant": "Constante", "ramp": "Rampa", "spike": "Pico"}
 TARGET_ORDER = ["mono", "micro", "serverless", "serverless-cold", "serverless-snap"]
 METRICS = ["throughput_rps", "error_rate_pct", "mean_ms", "median_ms", "p95_ms", "p99_ms"]
 
+# Cor fixa por arquitetura: o ciclo padrão do matplotlib reatribui cores quando um
+# alvo falta em alguma figura, e a mesma arquitetura mudaria de cor entre elas.
+COLOR = {"mono": "tab:blue", "micro": "tab:orange", "serverless": "tab:green",
+         "serverless-cold": "tab:green", "serverless-snap": "tab:purple"}
+
+OPORDER = ["listOwners", "ownerDetail", "createVisit", "listVets", "listPetTypes", "createOwner"]
+OPLAB = {"listOwners": "Listagem", "ownerDetail": "Ficha agregada", "createVisit": "Registro de visita",
+         "listVets": "Veterinários", "listPetTypes": "Tipos de animal", "createOwner": "Cadastro"}
+
+# As figuras entram na monografia reduzidas a cerca de 12 cm; o corpo padrão do
+# matplotlib ficaria ilegível na impressão.
+plt.rcParams.update({"font.size": 12, "axes.titlesize": 12, "axes.labelsize": 12,
+                     "legend.fontsize": 10, "xtick.labelsize": 11, "ytick.labelsize": 11})
+
 # Descarte de aquecimento (§3.7): só no cenário constante e só em mono/micro, para
 # excluir JIT e cache. No serverless o cold start é a medição de interesse, e em
 # rampa/pico os transitórios são o objeto de estudo. Use 0 em runs -Quick.
@@ -182,7 +196,8 @@ def grouped_bar(summary, metric, ylabel, title, fname):
     x = np.arange(len(SCN)); w = 0.8 / len(targets)
     fig, ax = plt.subplots(figsize=(8, 5))
     for i, t in enumerate(targets):
-        ax.bar(x + i * w, piv[t], w, yerr=cis[t].fillna(0), capsize=4, label=LABEL.get(t, t))
+        ax.bar(x + i * w, piv[t], w, yerr=cis[t].fillna(0), capsize=4,
+               label=LABEL.get(t, t), color=COLOR.get(t))
     ax.set_xticks(x + w * (len(targets) - 1) / 2)
     ax.set_xticklabels([SCNLAB[s] for s in SCN])
     ax.set_ylabel(ylabel); ax.set_title(title)
@@ -215,7 +230,7 @@ def ecdf(alldf):
         for t in targets:
             d = np.sort(sub[sub.target == t]["duration_ms"].to_numpy())
             y = np.arange(1, len(d) + 1) / len(d)
-            ax.plot(d, y, label=LABEL[t])
+            ax.plot(d, y, label=LABEL[t], color=COLOR.get(t))
         ax.set_xlabel("Tempo de resposta (ms)"); ax.set_ylabel("Proporção acumulada")
         ax.set_title(f"ECDF do tempo de resposta — {SCNLAB[s]}")
         ax.legend(title="Arquitetura"); ax.grid(alpha=0.3)
@@ -234,7 +249,7 @@ def timeseries(alldf):
             d = sub[sub.target == t].copy()
             d["sec"] = d.groupby(["run", "rep"])["time"].transform(lambda x: (x - x.min()).dt.total_seconds()).astype(int)
             g = d.groupby("sec")["duration_ms"].quantile(0.95)
-            ax.plot(g.index, g.values, label=LABEL[t], linewidth=1.5)
+            ax.plot(g.index, g.values, label=LABEL[t], linewidth=1.5, color=COLOR.get(t))
         ax.set_xlabel("Tempo do teste (s)"); ax.set_ylabel("p95 do tempo de resposta (ms)")
         ax.set_title(f"Evolução temporal do p95 — {SCNLAB[s]}")
         ax.legend(title="Arquitetura"); ax.grid(alpha=0.3)
@@ -338,7 +353,8 @@ def owner_detail_comparison(alldf):
         x = np.arange(len(SCN)); w = 0.8 / len(targets)
         fig, ax = plt.subplots(figsize=(8, 5))
         for i, t in enumerate(targets):
-            ax.bar(x + i * w, piv[t], w, yerr=cis[t].fillna(0), capsize=4, label=LABEL.get(t, t))
+            ax.bar(x + i * w, piv[t], w, yerr=cis[t].fillna(0), capsize=4,
+                   label=LABEL.get(t, t), color=COLOR.get(t))
         ax.set_xticks(x + w * (len(targets) - 1) / 2)
         ax.set_xticklabels([SCNLAB[s] for s in SCN])
         ax.set_ylabel("p95 (ms)")
@@ -347,6 +363,46 @@ def owner_detail_comparison(alldf):
         ax.legend(title="Arquitetura"); ax.grid(axis="y", alpha=0.3)
         fig.tight_layout(); fig.savefig(os.path.join(FIG, "bar_owner_detail_p95.png"), dpi=150); plt.close(fig)
     return pr, sm
+
+
+def by_operation(alldf, scenario="constant"):
+    """p95 por operação e arquitetura: mostra ONDE nasce a diferença, e não apenas
+    que ela existe. A ficha agregada aparece ao lado das operações simples do mesmo
+    teste, o que dá a razão entre elas."""
+    sub = alldf[(alldf.scenario == scenario) & (alldf["op"].astype(str) != "")]
+    if sub.empty:
+        return None
+    rows = []
+    for (t, op, run, rep), g in sub.groupby(["target", "op", "run", "rep"]):
+        d = g["duration_ms"].to_numpy()
+        rows.append({"target": t, "op": op, "run": run, "rep": rep,
+                     "median_ms": float(np.median(d)), "p95_ms": float(np.percentile(d, 95))})
+    sm = pd.DataFrame(rows).groupby(["target", "op"]).agg(
+        median_mean=("median_ms", "mean"), p95_mean=("p95_ms", "mean"), p95_ci=("p95_ms", ci95),
+    ).reset_index()
+    sm.to_csv(os.path.join(TAB, "by_operation.csv"), index=False)
+
+    ops = [o for o in OPORDER if o in set(sm.op)]
+    targets = order_targets(sm.target.unique())
+    if not ops or not targets:
+        return sm
+    x = np.arange(len(ops)); w = 0.8 / len(targets)
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for i, t in enumerate(targets):
+        d = sm[sm.target == t].set_index("op").reindex(ops)
+        ci = d["p95_ci"].fillna(0)
+        # escala log: o erro inferior não pode cruzar o zero
+        lo = np.minimum(ci, d["p95_mean"] * 0.99)
+        ax.bar(x + i * w, d["p95_mean"], w, yerr=[lo, ci], capsize=3,
+               label=LABEL.get(t, t), color=COLOR.get(t))
+    ax.set_xticks(x + w * (len(targets) - 1) / 2)
+    ax.set_xticklabels([OPLAB.get(o, o) for o in ops], rotation=20, ha="right")
+    ax.set_yscale("log")  # as arquiteturas diferem em ordens de grandeza
+    ax.set_ylabel("p95 (ms, escala log)")
+    ax.set_title(f"Tempo de resposta por operação — {SCNLAB[scenario]}")
+    ax.legend(title="Arquitetura"); ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout(); fig.savefig(os.path.join(FIG, "bar_by_operation.png"), dpi=150); plt.close(fig)
+    return sm
 
 
 def scalability(alldf):
@@ -371,7 +427,7 @@ def scalability(alldf):
             g = d.groupby("sec")
             thr = g.size() / reps  # throughput médio por segundo (entre repetições)
             err = g["failed"].mean().reindex(thr.index).fillna(0)
-            ax.plot(thr.index, thr.values, label=LABEL[t], linewidth=1.5)
+            ax.plot(thr.index, thr.values, label=LABEL[t], linewidth=1.5, color=COLOR.get(t))
             if s != "spike":
                 continue
             mp = max(win // 2, 1)
@@ -535,11 +591,12 @@ def main():
     per_rep.to_csv(os.path.join(TAB, "per_rep.csv"), index=False)
     summary.to_csv(os.path.join(TAB, "summary.csv"), index=False)
 
+    # Throughput e taxa de erro ficam em tabela (summary.csv): em modelo fechado o
+    # throughput é função da latência, e o erro é ~0 fora do pico.
     grouped_bar(summary, "p95_ms", "p95 (ms)", "Tempo de resposta (p95) por arquitetura", "bar_p95.png")
     grouped_bar(summary, "p99_ms", "p99 (ms)", "Tempo de resposta (p99) por arquitetura", "bar_p99.png")
-    grouped_bar(summary, "throughput_rps", "Throughput (req/s)", "Throughput por arquitetura", "bar_throughput.png")
-    grouped_bar(summary, "error_rate_pct", "Taxa de erro (%)", "Taxa de erro por arquitetura", "bar_error.png")
     boxplots(alldf); ecdf(alldf); timeseries(alldf)
+    byop = by_operation(alldf)
     sat = scalability(alldf)
     res = resource_usage()
     od_per_rep, od = owner_detail_comparison(alldf)
@@ -559,6 +616,9 @@ def main():
     if od is not None:
         print("\n=== Operação DISCRIMINANTE: ficha agregada (ownerDetail) ===")
         print(od.round(2).to_string(index=False))
+    if byop is not None:
+        print("\n=== Tempo de resposta por operação (cenário constante) ===")
+        print(byop.round(2).to_string(index=False))
     if not sat.empty:
         print("\n=== Escalabilidade: ponto de saturação (throughput sustentável, erro<2%) ===")
         print(sat.to_string(index=False))
