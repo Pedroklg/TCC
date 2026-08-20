@@ -41,6 +41,18 @@ METRICS = ["throughput_rps", "error_rate_pct", "mean_ms", "median_ms", "p95_ms",
 WARMUP_SEC = int(os.environ.get("WARMUP_SEC", "60"))
 WARMUP_TARGETS = ("mono", "micro")
 
+# Alocação por componente (Quadro 2 / infra/terraform/microservices.tf).
+ALLOC_VCPU_GB = {
+    ("Monolito", "ec2"): (2.0, 4.0),
+    ("MySQL", "ec2"): (2.0, 8.0),
+    ("Microsserviços", "config-server"): (0.25, 0.5),
+    ("Microsserviços", "discovery-server"): (0.25, 0.5),
+    ("Microsserviços", "customers-service"): (0.5, 1.0),
+    ("Microsserviços", "vets-service"): (0.25, 0.5),
+    ("Microsserviços", "visits-service"): (0.25, 0.5),
+    ("Microsserviços", "api-gateway"): (0.5, 1.0),
+}
+
 
 def parse_raw(path):
     """Extrai os Points de http_req_duration (1 por requisição)."""
@@ -96,12 +108,12 @@ def order_targets(ts):
     return [t for t in TARGET_ORDER if t in set(ts)]
 
 
-def per_rep_metrics(alldf):
+def per_rep_metrics(alldf, warmup_targets=WARMUP_TARGETS):
     rows = []
     # 'run' entra na chave: repetições homônimas de execuções distintas não podem
     # ser fundidas — o intervalo entre elas destruiria o throughput.
     for (t, s, run, rep), g in alldf.groupby(["target", "scenario", "run", "rep"]):
-        if s == "constant" and WARMUP_SEC > 0 and t in WARMUP_TARGETS:
+        if s == "constant" and WARMUP_SEC > 0 and t in warmup_targets:
             cut = g["time"].min() + pd.Timedelta(seconds=WARMUP_SEC)
             g = g[g["time"] >= cut]
             if g.empty:
@@ -117,6 +129,29 @@ def per_rep_metrics(alldf):
             "p99_ms": float(np.percentile(dur, 99)),
         })
     return pd.DataFrame(rows)
+
+
+def warmup_sensitivity(alldf):
+    """Aplica ao serverless o mesmo descarte de aquecimento das contínuas, separando a
+    penalidade de inicialização da penalidade de regime (§3.7)."""
+    srv = [t for t in alldf.target.unique() if str(t).startswith("serverless")]
+    if not srv or WARMUP_SEC <= 0:
+        return None
+    keys = ["target", "scenario", "run", "rep"]
+    m = per_rep_metrics(alldf, WARMUP_TARGETS).merge(
+        per_rep_metrics(alldf, tuple(WARMUP_TARGETS) + tuple(srv)),
+        on=keys, suffixes=("_sem", "_com"))
+    m = m[m.target.isin(srv) & (m.scenario == "constant")]
+    if m.empty:
+        return None
+    out = m.groupby(["target"]).agg(
+        mediana_sem_descarte=("median_ms_sem", "mean"),
+        mediana_com_descarte=("median_ms_com", "mean"),
+        p95_sem_descarte=("p95_ms_sem", "mean"),
+        p95_com_descarte=("p95_ms_com", "mean"),
+    ).reset_index()
+    out.to_csv(os.path.join(TAB, "warmup_sensitivity.csv"), index=False)
+    return out
 
 
 def ci95(x):
@@ -206,14 +241,29 @@ def timeseries(alldf):
         fig.tight_layout(); fig.savefig(os.path.join(FIG, f"timeseries_{s}.png"), dpi=150); plt.close(fig)
 
 
-def stat_tests(per_rep, metric="median_ms"):
-    """Compara as arquiteturas usando a MÉTRICA-RESUMO POR REPETIÇÃO (§3.7: a unidade
-    amostral é a repetição, n≈10 por grupo — não as requisições individuais).
-    Verifica a normalidade com Shapiro-Wilk (por grupo) ANTES do teste não-paramétrico
-    (Kruskal-Wallis global + Mann-Whitney par a par com correção de Bonferroni)."""
-    lines = ["Comparação entre arquiteturas — tempo de resposta (mediana por repetição)",
-             "Unidade amostral: repetição (métrica-resumo por execução), conforme a seção 3.7.",
-             "Normalidade: Shapiro-Wilk por grupo | Comparação: Kruskal-Wallis + Mann-Whitney (Bonferroni)\n"]
+def cliffs_delta(a, b):
+    """Tamanho de efeito não paramétrico: proporção de pares em que a>b menos a
+    proporção em que a<b. Com n=10 e diferenças grandes o p-valor satura, e só o
+    delta informa a magnitude."""
+    a, b = np.asarray(a), np.asarray(b)
+    if not len(a) or not len(b):
+        return np.nan
+    gt = sum(int((x > b).sum()) for x in a)
+    lt = sum(int((x < b).sum()) for x in a)
+    return (gt - lt) / (len(a) * len(b))
+
+
+def delta_label(d):
+    # limiares usuais de Romano et al. para interpretação do delta
+    ad = abs(d)
+    return ("desprezível" if ad < 0.147 else "pequeno" if ad < 0.33
+            else "médio" if ad < 0.474 else "grande")
+
+
+def compare_groups(per_rep, metric, title, lines):
+    """Shapiro-Wilk por grupo, Kruskal-Wallis global e Mann-Whitney par a par com
+    Bonferroni e Cliff's delta. Unidade amostral: a repetição (§3.7)."""
+    lines.append(f"=== {title} — {metric} ===")
     for s in SCN:
         sub = per_rep[per_rep.scenario == s]
         targets = order_targets(sub.target.unique())
@@ -237,10 +287,23 @@ def stat_tests(per_rep, metric="median_ms"):
         for i, j in pairs:
             U, pu = stats.mannwhitneyu(groups[i], groups[j], alternative="two-sided")
             med_i, med_j = np.median(groups[i]), np.median(groups[j])
+            d = cliffs_delta(groups[i], groups[j])
+            ratio = med_i / med_j if med_j else np.nan
             lines.append(f"    {LABEL[targets[i]]} vs {LABEL[targets[j]]}: "
-                         f"p={min(pu*nb,1):.2e} (Bonferroni) | medianas das repetições "
-                         f"{med_i:.1f} vs {med_j:.1f} ms")
+                         f"p={min(pu*nb,1):.2e} (Bonferroni) | delta={d:+.2f} ({delta_label(d)}) | "
+                         f"medianas {med_i:.1f} vs {med_j:.1f} ms (razão {ratio:.2f}x)")
         lines.append("")
+
+
+def stat_tests(per_rep, owner_detail=None):
+    lines = ["Comparação entre arquiteturas — unidade amostral: a repetição (§3.7).",
+             "Normalidade: Shapiro-Wilk por grupo | Comparação: Kruskal-Wallis + Mann-Whitney",
+             "com correção de Bonferroni | Magnitude: Cliff's delta e razão de medianas\n"]
+    for m in ("median_ms", "p95_ms"):
+        compare_groups(per_rep, m, "TODAS as requisições", lines)
+    if owner_detail is not None and not owner_detail.empty:
+        for m in ("median_ms", "p95_ms"):
+            compare_groups(owner_detail, m, "OPERAÇÃO DISCRIMINANTE (ficha agregada)", lines)
     txt = "\n".join(lines)
     with open(os.path.join(TAB, "stats_tests.txt"), "w", encoding="utf-8") as f:
         f.write(txt)
@@ -252,7 +315,7 @@ def owner_detail_comparison(alldf):
     É onde o monolito (em processo) difere dos microsserviços (entre serviços)."""
     sub = alldf[alldf["op"] == "ownerDetail"]
     if sub.empty:
-        return None
+        return None, None
     rows = []
     for (t, s, run, rep), g in sub.groupby(["target", "scenario", "run", "rep"]):
         d = g["duration_ms"].to_numpy()
@@ -283,14 +346,17 @@ def owner_detail_comparison(alldf):
                      "(resolução em processo × distribuída entre serviços/funções)")
         ax.legend(title="Arquitetura"); ax.grid(axis="y", alpha=0.3)
         fig.tight_layout(); fig.savefig(os.path.join(FIG, "bar_owner_detail_p95.png"), dpi=150); plt.close(fig)
-    return sm
+    return pr, sm
 
 
 def scalability(alldf):
-    """Curva de escalabilidade (throughput sob carga crescente) + ponto de saturação.
-    Usa rampa e pico. O ponto de saturação é o maior throughput sustentado com taxa de
-    erro abaixo do limiar (env SAT_ERR_THRESHOLD; padrão 2%), conforme a seção 3.7."""
+    """Curva de escalabilidade (throughput sob carga crescente) para rampa e pico.
+    O ponto de saturação sai APENAS do pico (§3.7): a rampa é de modelo fechado e o
+    throughput ali é limitado pela carga ofertada, não pela capacidade. É o maior
+    throughput sustentado por uma janela inteira com taxa de erro abaixo do limiar
+    (env SAT_ERR_THRESHOLD, padrão 2%; SAT_WINDOW_SEC, padrão 10 s)."""
     thr_err = float(os.environ.get("SAT_ERR_THRESHOLD", "0.02"))
+    win = int(os.environ.get("SAT_WINDOW_SEC", "10"))
     rows = []
     for s in ["ramp", "spike"]:
         sub = alldf[alldf.scenario == s]
@@ -306,7 +372,12 @@ def scalability(alldf):
             thr = g.size() / reps  # throughput médio por segundo (entre repetições)
             err = g["failed"].mean().reindex(thr.index).fillna(0)
             ax.plot(thr.index, thr.values, label=LABEL[t], linewidth=1.5)
-            ok = thr[err < thr_err]
+            if s != "spike":
+                continue
+            mp = max(win // 2, 1)
+            thr_w = thr.rolling(win, center=True, min_periods=mp).median()
+            err_w = err.rolling(win, center=True, min_periods=mp).max()
+            ok = thr_w[err_w < thr_err]
             rows.append({
                 "target": t, "scenario": s,
                 "throughput_max_sustentavel_rps": round(float(ok.max()), 1) if len(ok) else float("nan"),
@@ -328,10 +399,12 @@ def scalability(alldf):
 
 
 def resource_usage():
-    """Uso de CPU/memória por arquitetura (validação da equivalência — §3.4), lido de
-    results/resources/usage*.csv (gerados por cloudwatch-capture.ps1 na execução AWS;
-    o orquestrador grava um arquivo por braço: usage-mono/micro/serverless.csv).
-    Pula silenciosamente se nenhum arquivo existir."""
+    """Uso de recursos por arquitetura (verificação da equivalência — §3.4), lido de
+    results/resources/usage*.csv (cloudwatch-capture.ps1).
+
+    Converte a utilização percentual em vCPU e GB absolutos: a média de percentuais
+    entre componentes de tamanhos diferentes não é comparável ao monolito, e é o
+    valor absoluto que a equivalência declarada no Quadro 2 afirma."""
     paths = glob.glob(os.path.join(RESULTS, "resources", "usage*.csv"))
     if not paths:
         return None
@@ -339,23 +412,46 @@ def resource_usage():
     for c in ["cpu_avg_pct", "cpu_max_pct", "mem_avg_pct", "mem_max_pct"]:
         if c not in df.columns:
             df[c] = np.nan
+    alloc = [ALLOC_VCPU_GB.get((a, c), (np.nan, np.nan))
+             for a, c in zip(df["architecture"], df["component"])]
+    df["vcpu_alloc"] = [a[0] for a in alloc]
+    df["gb_alloc"] = [a[1] for a in alloc]
+    for col, pct, base in [("vcpu_avg", "cpu_avg_pct", "vcpu_alloc"), ("vcpu_max", "cpu_max_pct", "vcpu_alloc"),
+                           ("gb_avg", "mem_avg_pct", "gb_alloc"), ("gb_max", "mem_max_pct", "gb_alloc")]:
+        df[col] = df[pct] / 100 * df[base]
+    df.to_csv(os.path.join(TAB, "resource_usage_components.csv"), index=False)
+
     agg = df.groupby("architecture").agg(
-        cpu_avg=("cpu_avg_pct", "mean"), cpu_max=("cpu_max_pct", "max"),
-        mem_avg=("mem_avg_pct", "mean"), mem_max=("mem_max_pct", "max"),
+        vcpu_alocada=("vcpu_alloc", "sum"), vcpu_media=("vcpu_avg", "sum"), vcpu_pico=("vcpu_max", "sum"),
+        gb_alocada=("gb_alloc", "sum"), gb_media=("gb_avg", "sum"), gb_pico=("gb_max", "sum"),
     ).reset_index()
+    # O serverless não tem capacidade contratada; da captura de cold start vem o pico
+    # de memória por invocação, que é o único análogo disponível.
+    srv = agg.architecture == "Serverless"
+    agg.loc[srv, ["vcpu_alocada", "vcpu_media", "vcpu_pico", "gb_alocada", "gb_media", "gb_pico"]] = np.nan
+    cs = os.path.join(TAB, "coldstart_summary.csv")
+    if srv.any() and os.path.exists(cs):
+        try:
+            mb = pd.read_csv(cs)["mem_used_max_mb"].max()
+            if pd.notna(mb):
+                agg.loc[srv, "gb_pico"] = mb / 1024
+        except (OSError, ValueError, KeyError):
+            pass
     agg.to_csv(os.path.join(TAB, "resource_usage.csv"), index=False)
 
-    targets = [a for a in ["Monolito", "Microsserviços", "Serverless"] if a in set(agg.architecture)]
-    sub = agg[agg.architecture.isin(targets)]
-    if sub["cpu_avg"].notna().any():
+    sub = agg[agg.architecture.isin(["Monolito", "Microsserviços"])]
+    if not sub.empty and sub["vcpu_media"].notna().any():
         x = np.arange(len(sub)); w = 0.38
         fig, ax = plt.subplots(figsize=(7, 5))
-        ax.bar(x - w / 2, sub["cpu_avg"], w, label="CPU")
-        if sub["mem_avg"].notna().any():
-            ax.bar(x + w / 2, sub["mem_avg"], w, label="Memória")
+        ax.bar(x - w / 2, sub["vcpu_media"], w, label="vCPU média utilizada")
+        ax.bar(x + w / 2, sub["gb_media"], w, label="GB médios utilizados")
+        for i, (_, r) in enumerate(sub.iterrows()):
+            ax.text(i, np.nanmax([r["vcpu_media"], r["gb_media"]]),
+                    f"alocado: {r['vcpu_alocada']:.1f} vCPU / {r['gb_alocada']:.1f} GB",
+                    ha="center", va="bottom", fontsize=8)
         ax.set_xticks(x); ax.set_xticklabels(sub["architecture"])
-        ax.set_ylabel("Utilização média (%)")
-        ax.set_title("Uso de recursos por arquitetura (validação da equivalência)")
+        ax.set_ylabel("Uso absoluto (vCPU e GB)")
+        ax.set_title("Uso de recursos por arquitetura (verificação da equivalência)")
         ax.legend(); ax.grid(axis="y", alpha=0.3)
         fig.tight_layout(); fig.savefig(os.path.join(FIG, "resource_usage.png"), dpi=150); plt.close(fig)
     return agg
@@ -446,8 +542,9 @@ def main():
     boxplots(alldf); ecdf(alldf); timeseries(alldf)
     sat = scalability(alldf)
     res = resource_usage()
-    od = owner_detail_comparison(alldf)
-    tests = stat_tests(per_rep)
+    od_per_rep, od = owner_detail_comparison(alldf)
+    tests = stat_tests(per_rep, od_per_rep)
+    warm = warmup_sensitivity(alldf)
 
     cond = run_conditions()
 
@@ -466,8 +563,11 @@ def main():
         print("\n=== Escalabilidade: ponto de saturação (throughput sustentável, erro<2%) ===")
         print(sat.to_string(index=False))
     if res is not None:
-        print("\n=== Uso de recursos (CPU/memória, %) por arquitetura ===")
-        print(res.round(1).to_string(index=False))
+        print("\n=== Uso de recursos por arquitetura (vCPU e GB absolutos) ===")
+        print(res.round(2).to_string(index=False))
+    if warm is not None:
+        print("\n=== Sensibilidade ao descarte de aquecimento (serverless, constante) ===")
+        print(warm.round(1).to_string(index=False))
     print("\n=== Testes estatísticos ===\n" + tests)
     print(f"Figuras em {FIG}/ | Tabelas em {TAB}/")
 
