@@ -45,7 +45,7 @@ param(
   [string[]]$Only = @('mono', 'micro', 'serverless'),
   [int]$Reps = 10,                 # repetições por cenário (§3.7)
   [string]$DbSshKey = '',          # chave .pem do key pair -> reset do MySQL ao seed entre
-                                   # repetições (mono/micro, §3.7). Sem ela: SEM reset (avisa).
+                                   # repetições nos três braços (§3.7). Exigida fora do -Quick.
   [switch]$Quick,                  # ensaio: poucas reps + timeouts curtos (valida o pipeline)
   [switch]$SkipCaptures,           # pula CloudWatch/cold start (só k6 + teardown)
   [switch]$SkipBudgetCheck,        # não exige o 00-budget aplicado (use com consciência)
@@ -113,8 +113,11 @@ $ArchConfig = [ordered]@{
     batteries = @(
       # Gate na agregação: /customer/owners responde assim que o Service Connect
       # resolve, mas a agregação espera o Eureka propagar (~60-90 s a mais).
-      # Gatear na rota rápida contamina a primeira repetição.
-      @{ Target = 'micro'; Label = 'micro'; UrlOutput = 'microservices_base_url'; HealthPath = '/gateway/owners/1' }
+      # Owner 6 é o único da semente cujos pets têm visitas, então é o único em que
+      # o fallback do circuit breaker (visitas vazias) se distingue de um 200 sadio.
+      @{ Target = 'micro'; Label = 'micro'; UrlOutput = 'microservices_base_url'
+        HealthPath = '/gateway/owners/6'; HealthMatch = '"visits"\s*:\s*\[\s*\{'
+      }
     )
   }
   serverless = @{
@@ -149,18 +152,23 @@ function Get-TfOutput {
 }
 
 function Wait-Health {
-  param([string]$Url, [int]$TimeoutMin)
+  # MustMatch verifica o CORPO: um 200 pode vir de um caminho degradado (no gateway
+  # dos microsserviços, o fallback do circuit breaker responde sem as visitas).
+  param([string]$Url, [int]$TimeoutMin, [string]$MustMatch = '')
   $deadline = (Get-Date).AddMinutes($TimeoutMin)
   Write-Host "  health-gate: $Url (ate $TimeoutMin min)..." -ForegroundColor DarkCyan
   while ((Get-Date) -lt $deadline) {
     try {
       $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 8
-      if ($r.StatusCode -eq 200) { Write-Host "  OK (200)" -ForegroundColor Green; return }
+      if ($r.StatusCode -eq 200 -and (-not $MustMatch -or $r.Content -match $MustMatch)) {
+        Write-Host "  OK (200)" -ForegroundColor Green; return
+      }
     }
     catch { }
     Start-Sleep -Seconds 10
   }
-  throw "health-check excedeu $TimeoutMin min em $Url"
+  $extra = if ($MustMatch) { " (200 sem casar /$MustMatch/ - agregacao degradada?)" } else { '' }
+  throw "health-check excedeu $TimeoutMin min em $Url$extra"
 }
 
 function Invoke-Battery {
@@ -311,7 +319,7 @@ try {
       $winStart = Get-Date
       foreach ($b in $cfg.batteries) {
         $base = Get-TfOutput $b.UrlOutput
-        Wait-Health -Url ($base + $b.HealthPath) -TimeoutMin $HealthTimeoutMin
+        Wait-Health -Url ($base + $b.HealthPath) -TimeoutMin $HealthTimeoutMin -MustMatch ([string]$b.HealthMatch)
         Invoke-Battery -Target $b.Target -BaseUrl $base -Label $b.Label -Reps $Reps -Quick:$Quick -TimeoutMin $bTimeout `
           -DbHost $dbIp -DbKey $DbSshKey
       }

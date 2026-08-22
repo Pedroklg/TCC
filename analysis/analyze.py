@@ -628,6 +628,9 @@ def run_conditions():
                 "dropped_iterations": mt.get("dropped_iterations", {}).get("count", 0),
                 "vus_max": mt.get("vus_max", {}).get("max", np.nan),
                 "kb_per_req": (mt.get("data_received", {}).get("count", 0) / reqs / 1024) if reqs else np.nan,
+                # queda desta taxa sob carga = circuit breaker do gateway abrindo e
+                # devolvendo visitas vazias, ou seja, agregação que não agregou
+                "agg_visits_present": mt.get("agg_visits_present", {}).get("value", np.nan),
                 "rtt_min_ms": np.nan, "client_cpu_avg_pct": np.nan, "client_cpu_max_pct": np.nan,
             }
             if rtt is not None and {"scenario", "rep"} <= set(rtt.columns):
@@ -653,6 +656,7 @@ def run_conditions():
         rtt_min_ms=("rtt_min_ms", "median"),
         cpu_cliente_med=("client_cpu_avg_pct", "mean"),
         cpu_cliente_max=("client_cpu_max_pct", "max"),
+        agg_com_visitas=("agg_visits_present", "mean"),
     ).reset_index()
     agg.to_csv(os.path.join(TAB, "run_conditions_summary.csv"), index=False)
     return agg

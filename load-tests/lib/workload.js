@@ -16,7 +16,7 @@
 
 import http from 'k6/http';
 import { check, sleep } from 'k6';
-import { Trend } from 'k6/metrics';
+import { Rate, Trend } from 'k6/metrics';
 import { getTarget } from './targets.js';
 
 const target = getTarget();
@@ -25,6 +25,10 @@ const r = target.routes;
 
 export const ownerDetailLatency = new Trend('op_owner_detail_latency', true); // agregação (P1)
 export const writeLatency = new Trend('op_write_latency', true);
+// O gateway dos microsserviços protege a chamada ao visits-service com circuit
+// breaker cujo fallback devolve visitas vazias: a agregação responde 200 sem ter
+// agregado. Sem esta taxa, a degradação passa despercebida sob carga.
+export const aggregationVisits = new Rate('agg_visits_present');
 
 const headers = { 'Content-Type': 'application/json' };
 const VISIT_RATIO = Number(__ENV.VISIT_RATIO || 0.2);
@@ -76,6 +80,12 @@ export function vuLoop() {
       },
     });
     ownerDetailLatency.add(detail.timings.duration);
+
+    let visitCount = 0;
+    try {
+      (detail.json('pets') || []).forEach((p) => { visitCount += (p.visits || []).length; });
+    } catch (e) { /* corpo inesperado */ }
+    aggregationVisits.add(visitCount > 0);
 
     // 3) Escrita realista pós-consulta: agenda visita em um pet desse owner
     let pets = [];
