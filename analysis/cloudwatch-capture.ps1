@@ -75,28 +75,38 @@ if ($EcsCluster) {
   $qs = 'filter Type = "Container" | stats avg(CpuUtilized) as cpu_units_avg, ' +
   'max(CpuUtilized) as cpu_units_max, avg(MemoryUtilized) as mem_mb_avg, ' +
   'max(MemoryUtilized) as mem_mb_max by ContainerName'
-  $qid = aws logs start-query --log-group-name $lg --region $Region `
-    --start-time ([DateTimeOffset]::Parse($Start).ToUnixTimeSeconds()) `
-    --end-time ([DateTimeOffset]::Parse($End).ToUnixTimeSeconds()) `
-    --query-string $qs --query queryId --output text 2>$null
-  if ($qid) {
-    $res = $null
-    foreach ($i in 1..30) {
-      Start-Sleep -Seconds 2
-      $r = aws logs get-query-results --query-id $qid --region $Region --output json 2>$null | ConvertFrom-Json
-      if ($r.status -eq 'Complete') { $res = $r.results; break }
+  # O Container Insights leva alguns minutos para descarregar os dados no grupo de
+  # logs: consultar logo apos a bateria devolve resultado vazio, entao a consulta e
+  # reemitida ate vir preenchida.
+  $res = $null
+  foreach ($attempt in 1..5) {
+    $qid = aws logs start-query --log-group-name $lg --region $Region `
+      --start-time ([DateTimeOffset]::Parse($Start).ToUnixTimeSeconds()) `
+      --end-time ([DateTimeOffset]::Parse($End).ToUnixTimeSeconds()) `
+      --query-string $qs --query queryId --output text 2>$null
+    if ($qid) {
+      foreach ($i in 1..15) {
+        Start-Sleep -Seconds 2
+        $r = aws logs get-query-results --query-id $qid --region $Region --output json 2>$null | ConvertFrom-Json
+        if ($r.status -eq 'Complete') { $res = $r.results; break }
+      }
     }
-    if ($res) {
-      $ctrCsv = Join-Path (Split-Path $OutCsv) 'containers-micro.csv'
-      $res | ForEach-Object {
-        $o = [ordered]@{}
-        $_ | ForEach-Object { $o[$_.field] = $_.value }
-        [pscustomobject]$o
-      } | Export-Csv -Path $ctrCsv -NoTypeInformation -Encoding utf8
-      "Consumo por conteiner salvo em $ctrCsv"
+    if ($res -and @($res).Count -gt 0) { break }
+    if ($attempt -lt 5) {
+      Write-Host "  Container Insights ainda sem dados; nova tentativa em 60 s..." -ForegroundColor DarkGray
+      Start-Sleep -Seconds 60
     }
-    else { Write-Warning "Container Insights: consulta nao concluiu (metricas podem levar minutos apos o start)" }
   }
+  if ($res -and @($res).Count -gt 0) {
+    $ctrCsv = Join-Path (Split-Path $OutCsv) 'containers-micro.csv'
+    $res | ForEach-Object {
+      $o = [ordered]@{}
+      $_ | ForEach-Object { $o[$_.field] = $_.value }
+      [pscustomobject]$o
+    } | Export-Csv -Path $ctrCsv -NoTypeInformation -Encoding utf8
+    "Consumo por conteiner salvo em $ctrCsv"
+  }
+  else { Write-Warning "Container Insights sem dados na janela apos 5 tentativas" }
 }
 
 # Serverless (Lambda): duração média (proxy de uso de CPU); memória usada nos logs.
