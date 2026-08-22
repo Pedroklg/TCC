@@ -72,8 +72,12 @@ resource "aws_lambda_function" "fn" {
       MAIN_CLASS                       = "org.springframework.samples.petclinic.serverless.ServerlessApplication"
       SPRING_CLOUD_FUNCTION_DEFINITION = each.value.fn
       MYSQL_URL                        = "jdbc:mysql://${aws_instance.mysql.private_ip}:3306/${var.db_name}?allowPublicKeyRetrieval=true&useSSL=false"
-      MYSQL_USER                       = var.db_user
-      MYSQL_PASS                       = var.db_password
+      # Cada ambiente de execução atende uma invocação por vez, mas abre um pool
+      # próprio: com o default de 10 do Hikari, dezenas de ambientes esgotam o
+      # limite de conexões do MySQL e as invocações frias falham com erro 1040.
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE = "2"
+      MYSQL_USER                                 = var.db_user
+      MYSQL_PASS                                 = var.db_password
     }
   }
 

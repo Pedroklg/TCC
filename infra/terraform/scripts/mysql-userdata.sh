@@ -12,7 +12,7 @@ docker run -d --name mysql --restart always -p 3306:3306 \
   -e MYSQL_DATABASE=${db_name} \
   -e MYSQL_USER=${db_user} \
   -e MYSQL_PASSWORD=${db_password} \
-  mysql:8.4 --mysql-native-password=ON
+  mysql:8.4 --mysql-native-password=ON --max-connections=1000
 
 # Espera o servidor definitivo. O entrypoint sobe um servidor temporário para
 # inicializar o banco, e 'mysqladmin ping' já responde a ele — semear nessa fase
