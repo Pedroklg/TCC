@@ -182,10 +182,14 @@ function Invoke-Battery {
   # Start-Process p/ ter o WATCHDOG (WaitForExit com timeout). -NoNewWindow herda o
   # console, então o output do k6 continua aparecendo ao vivo.
   $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $a -NoNewWindow -PassThru
+  # Sem reter o handle nativo, o objeto de Start-Process nao expoe o ExitCode e
+  # qualquer codigo de saida viria vazio, indistinguivel de sucesso.
+  $null = $p.Handle
   if (-not $p.WaitForExit($TimeoutMin * 60 * 1000)) {
     try { $p.Kill() } catch { }
     throw "WATCHDOG: bateria '$Label' passou de $TimeoutMin min - abortando (o finally vai destruir)"
   }
+  $p.WaitForExit()
   # run-all tolera limiar k6 não atendido e sai 0; !=0 é anomalia, mas não aborta a sessão.
   if ($p.ExitCode -ne 0) { Write-Warning "run-all saiu com codigo $($p.ExitCode) em '$Label'; seguindo." }
 }
