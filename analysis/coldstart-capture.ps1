@@ -24,7 +24,10 @@ if (($null -eq $IsWindows) -or $IsWindows) {
 
 New-Item -ItemType Directory -Force -Path (Split-Path $OutCsv) | Out-Null
 $startEpochMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-$qual = if ($Qualifier) { @('--qualifier', $Qualifier) } else { @() }
+# Atribuir @() por um if devolve $null, e o splat de $null injeta um argumento
+# vazio que o aws consome como o arquivo de saída, deslocando o real.
+$qual = @()
+if ($Qualifier) { $qual = @('--qualifier', $Qualifier) }
 $payload = 'eyJwYXRoUGFyYW1ldGVycyI6eyJvd25lcklkIjoiMSIsInBldElkIjoiMSJ9fQ==' # base64 {"pathParameters":{"ownerId":"1","petId":"1"}}
 $tmp = [IO.Path]::GetTempPath()
 $outJson = Join-Path $tmp 'lambda-out.json'
