@@ -17,7 +17,10 @@ param(
   [string]$OutCsv = 'results/coldstart/measurements.csv'
 )
 $ErrorActionPreference = 'Stop'
-$env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+# Fora do Windows os escopos Machine/User devolvem null e zerariam o PATH.
+if (($null -eq $IsWindows) -or $IsWindows) {
+  $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+}
 
 New-Item -ItemType Directory -Force -Path (Split-Path $OutCsv) | Out-Null
 $startEpochMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()

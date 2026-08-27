@@ -25,18 +25,18 @@
 
 .EXAMPLE
   # Ensaio rápido do pipeline inteiro (sobe, roda pouco, captura, DESTRÓI):
-  .\run-aws-experiment.ps1 -Quick
+  ./run-aws-experiment.ps1 -Quick
 
 .EXAMPLE
   # Rodada definitiva, só o monolito e os microsserviços (deixa serverless p/ depois):
-  .\run-aws-experiment.ps1 -Only mono,micro
+  ./run-aws-experiment.ps1 -Only mono,micro
 
 .EXAMPLE
   # Tudo, 10 repetições por cenário (default):
-  .\run-aws-experiment.ps1
+  ./run-aws-experiment.ps1
 
 .NOTES
-  Pré-requisitos: aws configure feito; infra\terraform\terraform.tfvars preenchido;
+  Pré-requisitos: aws configure feito; infra/terraform/terraform.tfvars preenchido;
   módulo 00-budget já aplicado (o budget é o primeiro recurso, por regra de custo do projeto).
 #>
 [CmdletBinding()]
@@ -57,15 +57,20 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# $IsWindows não existe no PS 5.1, que só roda no Windows.
+$OnWindows = ($null -eq $IsWindows) -or $IsWindows
 # Recarrega o PATH (Machine+User) para encontrar CLIs instaladas nesta sessão (terraform/aws/k6).
-$env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+# Fora do Windows esses escopos devolvem null e zerariam o PATH.
+if ($OnWindows) {
+  $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::GetEnvironmentVariable('Path', 'User')
+}
 
 $RepoRoot = $PSScriptRoot
-$TfDir = Join-Path $RepoRoot 'infra\terraform'
+$TfDir = Join-Path $RepoRoot 'infra/terraform'
 $BudgetDir = Join-Path $TfDir '00-budget'
-$RunAll = Join-Path $RepoRoot 'load-tests\run-all.ps1'
-$CwCapture = Join-Path $RepoRoot 'analysis\cloudwatch-capture.ps1'
-$ColdCapture = Join-Path $RepoRoot 'analysis\coldstart-capture.ps1'
+$RunAll = Join-Path $RepoRoot 'load-tests/run-all.ps1'
+$CwCapture = Join-Path $RepoRoot 'analysis/cloudwatch-capture.ps1'
+$ColdCapture = Join-Path $RepoRoot 'analysis/coldstart-capture.ps1'
 
 if ($Quick) {
   if (-not $PSBoundParameters.ContainsKey('BatteryTimeoutMin')) { $BatteryTimeoutMin = 15 }
@@ -174,24 +179,37 @@ function Wait-Health {
 function Invoke-Battery {
   param([string]$Target, [string]$BaseUrl, [string]$Label, [int]$Reps, [switch]$Quick, [int]$TimeoutMin,
     [string]$DbHost = '', [string]$DbKey = '')
-  $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $RunAll,
+  $a = @('-NoProfile', '-File', $RunAll,
     '-Target', $Target, '-BaseUrl', $BaseUrl, '-Label', $Label, '-Reps', $Reps)
   if ($Quick) { $a += '-Quick' }
   if ($DbHost) { $a += @('-ResetBetweenReps', '-DbSshHost', $DbHost, '-DbSshKey', $DbKey) }
   Write-Host "  bateria '$Label' ($Reps reps) -> $BaseUrl" -ForegroundColor Cyan
-  # Start-Process p/ ter o WATCHDOG (WaitForExit com timeout). -NoNewWindow herda o
-  # console, então o output do k6 continua aparecendo ao vivo.
-  $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $a -NoNewWindow -PassThru
-  # Sem reter o handle nativo, o objeto de Start-Process nao expoe o ExitCode e
-  # qualquer codigo de saida viria vazio, indistinguivel de sucesso.
-  $null = $p.Handle
-  if (-not $p.WaitForExit($TimeoutMin * 60 * 1000)) {
-    try { $p.Kill() } catch { }
-    throw "WATCHDOG: bateria '$Label' passou de $TimeoutMin min - abortando (o finally vai destruir)"
+
+  if ($OnWindows) {
+    # Start-Process p/ ter o WATCHDOG (WaitForExit com timeout). -NoNewWindow herda o
+    # console, então o output do k6 continua aparecendo ao vivo.
+    $p = Start-Process -FilePath 'powershell.exe' `
+      -ArgumentList (@('-ExecutionPolicy', 'Bypass') + $a) -NoNewWindow -PassThru
+    # Sem reter o handle nativo, o objeto de Start-Process nao expoe o ExitCode e
+    # qualquer codigo de saida viria vazio, indistinguivel de sucesso.
+    $null = $p.Handle
+    if (-not $p.WaitForExit($TimeoutMin * 60 * 1000)) {
+      try { $p.Kill() } catch { }
+      throw "WATCHDOG: bateria '$Label' passou de $TimeoutMin min - abortando (o finally vai destruir)"
+    }
+    $p.WaitForExit()
+    $code = $p.ExitCode
   }
-  $p.WaitForExit()
+  else {
+    # timeout(1) devolve 124 ao estourar e 137 quando o -k precisa do SIGKILL.
+    & timeout -k 30s "${TimeoutMin}m" pwsh @a
+    $code = $LASTEXITCODE
+    if ($code -eq 124 -or $code -eq 137) {
+      throw "WATCHDOG: bateria '$Label' passou de $TimeoutMin min - abortando (o finally vai destruir)"
+    }
+  }
   # run-all tolera limiar k6 não atendido e sai 0; !=0 é anomalia, mas não aborta a sessão.
-  if ($p.ExitCode -ne 0) { Write-Warning "run-all saiu com codigo $($p.ExitCode) em '$Label'; seguindo." }
+  if ($code -ne 0) { Write-Warning "run-all saiu com codigo $code em '$Label'; seguindo." }
 }
 
 function Confirm-Teardown {
@@ -260,7 +278,7 @@ function Test-Preflight {
     if (-not (Get-Command $c -ErrorAction SilentlyContinue)) { throw "CLI '$c' nao encontrada no PATH." }
   }
   if (-not (Test-Path (Join-Path $TfDir 'terraform.tfvars'))) {
-    throw "Falta infra\terraform\terraform.tfvars (copie do .example e preencha my_ip_cidr/key_name)."
+    throw "Falta infra/terraform/terraform.tfvars (copie do .example e preencha my_ip_cidr/key_name)."
   }
   & aws sts get-caller-identity *> $null
   if ($LASTEXITCODE -ne 0) { throw "Credenciais AWS ausentes/invalidas. Rode: aws configure" }
@@ -287,7 +305,7 @@ function Test-Preflight {
 # ----------------------------------------------------------------------------- main
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$logDir = Join-Path $RepoRoot "results\aws-run"
+$logDir = Join-Path $RepoRoot "results/aws-run"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 Start-Transcript -Path (Join-Path $logDir "$stamp.log") | Out-Null
 
@@ -350,6 +368,6 @@ try {
 finally {
   Write-Host "`n===================== RESUMO =====================" -ForegroundColor Magenta
   if ($summary) { $summary | Format-Table -AutoSize | Out-String | Write-Host }
-  Write-Host "Apos as rodadas: python analysis\analyze.py ; python analysis\coldstart.py" -ForegroundColor DarkGray
+  Write-Host "Apos as rodadas: python analysis/analyze.py ; python analysis/coldstart.py" -ForegroundColor DarkGray
   Stop-Transcript | Out-Null
 }

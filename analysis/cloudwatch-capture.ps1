@@ -25,7 +25,10 @@ $ErrorActionPreference = 'Stop'
 # Cultura invariante: Export-Csv usa a cultura corrente e em pt-BR gravaria
 # "24,1", que o pandas lê como texto.
 [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
-$env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+# Fora do Windows os escopos Machine/User devolvem null e zerariam o PATH.
+if (($null -eq $IsWindows) -or $IsWindows) {
+  $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+}
 New-Item -ItemType Directory -Force -Path (Split-Path $OutCsv) | Out-Null
 
 function Stat($ns, $metric, $dimName, $dimVal) {

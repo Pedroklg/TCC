@@ -3,9 +3,9 @@
 # antes de cada bateria — relevante quando o alvo estiver na AWS.
 #
 # Uso:
-#   .\load-tests\run-all.ps1 -Target mono                 # runs definitivos (longos)
-#   .\load-tests\run-all.ps1 -Target mono -Quick          # validação rápida (~1,5 min/alvo)
-#   .\load-tests\run-all.ps1 -Target serverless -BaseUrl https://abc123.execute-api.us-east-1.amazonaws.com/petclinic/api
+#   ./load-tests/run-all.ps1 -Target mono                 # runs definitivos (longos)
+#   ./load-tests/run-all.ps1 -Target mono -Quick          # validação rápida (~1,5 min/alvo)
+#   ./load-tests/run-all.ps1 -Target serverless -BaseUrl https://abc123.execute-api.us-east-1.amazonaws.com/petclinic/api
 
 param(
   [ValidateSet('mono', 'micro', 'serverless')]
@@ -24,7 +24,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 if (-not $Label) { $Label = $Target }
-$outDir = Join-Path $root "results\$Label\$stamp"
+$outDir = Join-Path $root "results/$Label/$stamp"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 # Monta os argumentos -e comuns
@@ -89,10 +89,25 @@ function Start-CpuSampler {
   param([string]$Path, [string]$Scenario, [string]$Rep)
   Start-Job -ArgumentList $Path, $Scenario, $Rep -ScriptBlock {
     param($p, $s, $r)
+    # /proc/stat acumula desde o boot: a ocupação é a diferença entre duas leituras.
+    function Read-ProcStat {
+      $v = (Get-Content /proc/stat -TotalCount 1) -split '\s+' |
+        Select-Object -Skip 1 | Where-Object { $_ } | ForEach-Object { [double]$_ }
+      return @{ idle = $v[3] + $v[4]; total = ($v | Measure-Object -Sum).Sum }
+    }
+    $prev = if ($IsLinux) { Read-ProcStat } else { $null }
     while ($true) {
-      $v = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime
-      "$s,$r,$v" | Add-Content -Path $p
       Start-Sleep -Seconds 5
+      if ($IsLinux) {
+        $cur = Read-ProcStat
+        $dt = $cur.total - $prev.total
+        $v = if ($dt -gt 0) { [math]::Round(100 * (1 - ($cur.idle - $prev.idle) / $dt), 1) } else { 0 }
+        $prev = $cur
+      }
+      else {
+        $v = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime
+      }
+      "$s,$r,$v" | Add-Content -Path $p
     }
   }
 }
@@ -119,7 +134,7 @@ foreach ($s in $scenarios) {
       Write-Host "  reset do banco (baseline limpo para a repetição)..." -ForegroundColor DarkGray
       $resetArgs = @{ Target = $Target }
       if ($DbSshHost) { $resetArgs.SshHost = $DbSshHost; $resetArgs.SshKey = $DbSshKey }
-      & (Join-Path $root 'infra\reset-db.ps1') @resetArgs | Out-Null
+      & (Join-Path $root 'infra/reset-db.ps1') @resetArgs | Out-Null
     }
     $rtt = Measure-BaselineRtt
     if ($rtt) {

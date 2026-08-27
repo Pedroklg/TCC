@@ -12,11 +12,18 @@ param(
   [string]$DbName = 'petclinic'
 )
 $ErrorActionPreference = 'Stop'
-$env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+# $IsWindows não existe no PS 5.1, que só roda no Windows.
+$OnWindows = ($null -eq $IsWindows) -or $IsWindows
+# Fora do Windows os escopos Machine/User devolvem null e zerariam o PATH.
+if ($OnWindows) {
+  $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+}
 
 # --- Modo REMOTO (AWS): recria o database a partir do seed persistido no contêiner ---
 if ($SshHost) {
   if (-not $SshKey) { throw "reset-db remoto: informe -SshKey (chave .pem do key pair)" }
+  # ssh recusa chave privada legível por outros, e um .pem copiado costuma vir 644.
+  if (-not $OnWindows) { & chmod 600 $SshKey }
   $sshBase = @('-i', $SshKey, '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=15', "$SshUser@$SshHost")
   # 1) DROP + CREATE via stdin (evita aspas aninhadas Windows->ssh->sh)
   "DROP DATABASE IF EXISTS $DbName; CREATE DATABASE $DbName;" |
@@ -32,8 +39,8 @@ if ($SshHost) {
 }
 
 $root = Split-Path $PSScriptRoot -Parent
-$mono = Join-Path $root 'apps\monolith\src\main\resources\db\mysql\data.sql'
-$micro = Join-Path $root 'apps\microservices'
+$mono = Join-Path $root 'apps/monolith/src/main/resources/db/mysql/data.sql'
+$micro = Join-Path $root 'apps/microservices'
 
 # Serverless reusa o schema e o seed do monolito.
 $localTarget = if ($Target -eq 'serverless') { 'mono' } else { $Target }
@@ -43,9 +50,9 @@ $cfg = @{
              seeds = @($mono) }
   micro = @{ container = 'petclinic-micro-mysql'; user = 'root'
              seeds = @(
-               (Join-Path $micro 'spring-petclinic-customers-service\src\main\resources\db\mysql\data.sql'),
-               (Join-Path $micro 'spring-petclinic-vets-service\src\main\resources\db\mysql\data.sql'),
-               (Join-Path $micro 'spring-petclinic-visits-service\src\main\resources\db\mysql\data.sql')
+               (Join-Path $micro 'spring-petclinic-customers-service/src/main/resources/db/mysql/data.sql'),
+               (Join-Path $micro 'spring-petclinic-vets-service/src/main/resources/db/mysql/data.sql'),
+               (Join-Path $micro 'spring-petclinic-visits-service/src/main/resources/db/mysql/data.sql')
              ) }
 }[$localTarget]
 
