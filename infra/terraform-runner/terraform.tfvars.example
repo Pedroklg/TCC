@@ -1,0 +1,7 @@
+# Copie para terraform.tfvars (não versionado) e preencha.
+admin_ip_cidr = "203.0.113.5/32" # curl -4 ifconfig.me, sem VPN
+key_name      = "tcc-keypair"
+
+# Opcionais — os defaults em variables.tf já servem:
+# instance_type = "c5.xlarge"
+# volume_gb     = 100
