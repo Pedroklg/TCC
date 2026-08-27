@@ -15,6 +15,7 @@ param(
   [string]$Label = '',  # nome da pasta de resultados (default = Target); use p/ subcenários
                         # serverless: 'serverless-cold' e 'serverless-snap'
   [switch]$Quick,  # durações/VUs reduzidos só para validar o pipeline de coleta
+  [switch]$Calibrate,  # roda só o cenário de calibração do ponto de saturação
   [switch]$ResetBetweenReps,  # reseta o MySQL ao seed antes de cada rep (§3.7)
   [string]$DbSshHost = '',  # AWS: IP público da EC2 do MySQL -> reset REMOTO via SSH
   [string]$DbSshKey = ''    # AWS: chave .pem do key pair (obrigatória com -DbSshHost)
@@ -40,11 +41,16 @@ $overrides = @{
   constant = @()
   ramp     = @()
   spike    = @('-e', 'THINK_MIN=0', '-e', 'THINK_MAX=0', '-e', 'NEW_OWNER_RATIO=0')
+  # Calibração é modelo aberto como o pico, e pelo mesmo motivo não cria owners.
+  calibration = @('-e', 'THINK_MIN=0', '-e', 'THINK_MAX=0', '-e', 'NEW_OWNER_RATIO=0')
 }
+if ($Calibrate -and -not $PSBoundParameters.ContainsKey('Reps')) { $Reps = 1 }
 if ($Quick) {
   if (-not $PSBoundParameters.ContainsKey('Reps')) { $Reps = 2 }  # validação: poucas repetições
   $overrides.constant = @('-e', 'VUS=10', '-e', 'DURATION=30s')
   $overrides.ramp     = @('-e', 'MAX_VUS=30', '-e', 'RAMP_UP=15s', '-e', 'HOLD=15s', '-e', 'RAMP_DOWN=10s')
+  $overrides.calibration += @('-e', 'START_RATE=10', '-e', 'MAX_RATE=60', '-e', 'STEPS=3',
+                             '-e', 'STEP_HOLD=15s', '-e', 'STEP_RISE=5s', '-e', 'MAX_VUS=200')
   $overrides.spike   += @('-e', 'BASE_RATE=10', '-e', 'PEAK_RATE=60', '-e', 'PREALLOC_VUS=50', '-e', 'MAX_VUS=200',
                           '-e', 'PRE=10s', '-e', 'RISE=5s', '-e', 'PEAK_HOLD=20s', '-e', 'FALL=5s', '-e', 'POST=10s')
 }
@@ -125,7 +131,7 @@ $cpuCsv = Join-Path $outDir 'client-cpu.csv'
 } | ConvertTo-Json | Out-File (Join-Path $outDir 'run-metadata.json') -Encoding utf8
 
 # --- Cenários × repetições ---
-$scenarios = @('constant', 'ramp', 'spike')
+$scenarios = if ($Calibrate) { @('calibration') } else { @('constant', 'ramp', 'spike') }
 foreach ($s in $scenarios) {
   foreach ($rep in 1..$Reps) {
     $tag = 'rep{0:D2}' -f $rep

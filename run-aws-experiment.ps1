@@ -47,6 +47,7 @@ param(
   [string]$DbSshKey = '',          # chave .pem do key pair -> reset do MySQL ao seed entre
                                    # repetições nos três braços (§3.7). Exigida fora do -Quick.
   [switch]$Quick,                  # ensaio: poucas reps + timeouts curtos (valida o pipeline)
+  [switch]$Calibrate,              # piloto: só o cenário de calibração, p/ achar o teto de cada braço
   [switch]$SkipCaptures,           # pula CloudWatch/cold start (só k6 + teardown)
   [switch]$SkipBudgetCheck,        # não exige o 00-budget aplicado (use com consciência)
   [int]$HealthTimeoutMin = 20,     # teto p/ o app subir e responder 200
@@ -179,10 +180,11 @@ function Wait-Health {
 
 function Invoke-Battery {
   param([string]$Target, [string]$BaseUrl, [string]$Label, [int]$Reps, [switch]$Quick, [int]$TimeoutMin,
-    [string]$DbHost = '', [string]$DbKey = '')
+    [switch]$Calibrate, [string]$DbHost = '', [string]$DbKey = '')
   $a = @('-NoProfile', '-File', $RunAll,
     '-Target', $Target, '-BaseUrl', $BaseUrl, '-Label', $Label, '-Reps', $Reps)
   if ($Quick) { $a += '-Quick' }
+  if ($Calibrate) { $a += '-Calibrate' }
   if ($DbHost) { $a += @('-ResetBetweenReps', '-DbSshHost', $DbHost, '-DbSshKey', $DbKey) }
   Write-Host "  bateria '$Label' ($Reps reps) -> $BaseUrl" -ForegroundColor Cyan
 
@@ -272,7 +274,7 @@ function Invoke-Capture {
 # ----------------------------------------------------------------------------- preflight
 
 function Test-Preflight {
-  if (-not $DbSshKey -and -not $Quick) {
+  if (-not $DbSshKey -and -not $Quick -and -not $Calibrate) {
     throw "Rodada definitiva exige -DbSshKey: o reset do MySQL ao seed entre repeticoes (§3.7) depende dele. Use -Quick para ensaiar sem reset."
   }
   foreach ($c in 'terraform', 'aws', 'k6') {
@@ -346,7 +348,7 @@ try {
       foreach ($b in $cfg.batteries) {
         $base = Get-TfOutput $b.UrlOutput
         Wait-Health -Url ($base + $b.HealthPath) -TimeoutMin $HealthTimeoutMin -MustMatch ([string]$b.HealthMatch)
-        Invoke-Battery -Target $b.Target -BaseUrl $base -Label $b.Label -Reps $Reps -Quick:$Quick -TimeoutMin $bTimeout `
+        Invoke-Battery -Target $b.Target -BaseUrl $base -Label $b.Label -Reps $Reps -Quick:$Quick -Calibrate:$Calibrate -TimeoutMin $bTimeout `
           -DbHost $dbIp -DbKey $DbSshKey
       }
       $winEnd = Get-Date

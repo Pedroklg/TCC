@@ -54,6 +54,28 @@ latência do enlace (registrada em `baseline-latency.txt`). A comparação é
 Quando houver dados de cold/warm start, acrescentar um gráfico dedicado
 (barras/box do *Init Duration*: cold puro × SnapStart × warm).
 
+## Calibração do ponto de saturação (piloto)
+
+Roda antes da campanha definitiva e responde uma pergunta que o desenho não fecha
+sozinho: se a taxa de pico não passar do teto de nenhuma arquitetura, a taxa de erro
+sai zero nos três e deixa de discriminar. O piloto sobe cada braço, aplica uma rampa
+de chegada em degraus geométricos e mede onde o throughput deixa de crescer.
+
+```bash
+# uma repetição por braço, sem captura de recursos nem de cold start
+pwsh ./run-aws-experiment.ps1 -Calibrate -SkipCaptures
+
+python analysis/calibration.py
+```
+
+Saídas: `tables/calibration_curve.csv` (curva por patamar), `tables/calibration_summary.csv`
+(teto, ponto de saturação e onde o erro cruza 5% por braço) e `figures/calibration.png`.
+O script imprime o `PEAK_RATE` sugerido para o cenário de pico.
+
+O descarte de iterações é reportado, mas não distingue sozinho alvo lento de teto de
+VUs: em modelo aberto os dois impedem o início de novas iterações. Confronte com
+`vus_max` e `client-cpu.csv` da mesma bateria antes de concluir que o gerador limitou.
+
 ## Capturas na AWS
 
 O `run-aws-experiment.ps1` chama estes scripts automaticamente. Para rodá-los à
