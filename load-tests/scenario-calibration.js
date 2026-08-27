@@ -31,7 +31,12 @@ export const options = {
       startRate: START,
       timeUnit: '1s',
       preAllocatedVUs: Number(__ENV.PREALLOC_VUS || 200),
-      maxVUs: Number(__ENV.MAX_VUS || 3000),
+      // Cada VU custa cerca de 2,4 MB com as fichas agregadas deste experimento, e
+      // um teto de 3.000 esgota a memória do gerador antes de o alvo saturar. O teto
+      // é o mesmo do cenário de pico, para calibrar sob a restrição de cliente que a
+      // campanha vai impor; alcançá-lo aparece como dropped_iterations, que é o
+      // indício correto de saturação em modelo aberto.
+      maxVUs: Number(__ENV.MAX_VUS || 800),
       stages,
     },
   },
