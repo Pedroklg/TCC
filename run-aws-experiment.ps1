@@ -284,9 +284,12 @@ function Test-Preflight {
   if ($LASTEXITCODE -ne 0) { throw "Credenciais AWS ausentes/invalidas. Rode: aws configure" }
 
   if (-not $SkipBudgetCheck) {
-    $b = & terraform -chdir="$BudgetDir" state list 2>$null
-    if (-not $b) {
-      throw "Modulo 00-budget NAO aplicado (regra do projeto: budget primeiro). Rode:`n" +
+    # Consulta a conta, nao o state local do 00-budget: o state nao e versionado e
+    # nao existe em maquina nova, mas o que a regra exige e o alerta existir.
+    $acct = & aws sts get-caller-identity --query Account --output text 2>$null
+    $b = & aws budgets describe-budgets --account-id $acct --query 'Budgets[].BudgetName' --output text 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($b)) {
+      throw "Nenhum budget na conta (regra do projeto: budget primeiro). Rode:`n" +
       "  terraform -chdir=`"$BudgetDir`" init; terraform -chdir=`"$BudgetDir`" apply`n" +
       "(ou -SkipBudgetCheck se ja garantiu o alerta de custo por fora.)"
     }
