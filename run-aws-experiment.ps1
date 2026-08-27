@@ -109,6 +109,7 @@ $ArchConfig = [ordered]@{
   micro      = @{
     targets   = $CommonTargets + @(
       'aws_ecs_service.svc',
+      'aws_ecs_service.gateway',
       'aws_iam_role_policy_attachment.ecs_exec', # órfão: sem ele o Fargate não puxa imagem/logs
       'aws_lb_listener.gateway',
       'aws_security_group_rule.mysql_from_micro',

@@ -32,6 +32,11 @@ locals {
   tier_config    = { for k, v in local.micro_services : k => v if k == "config-server" }
   tier_discovery = { for k, v in local.micro_services : k => v if k == "discovery-server" }
   tier_apps      = { for k, v in local.micro_services : k => v if !contains(local.micro_platform, k) }
+  # O gateway é cliente Service Connect dos demais e sobe num nível à parte:
+  # o proxy da tarefa recebe os endpoints existentes no início dela, e um par que
+  # se registra depois nunca passa a resolver.
+  tier_backends = { for k, v in local.tier_apps : k => v if !v.alb }
+  tier_gateway  = { for k, v in local.tier_apps : k => v if v.alb }
 }
 
 resource "aws_cloudwatch_log_group" "micro" {
@@ -202,14 +207,15 @@ resource "aws_ecs_service" "discovery" {
   depends_on = [aws_ecs_service.config]
 }
 
-# Nível 3 — serviços de negócio + gateway: precisam de config E de Eureka.
+# Nível 3 — serviços de negócio: precisam de config E de Eureka.
 resource "aws_ecs_service" "svc" {
-  for_each        = local.tier_apps
-  name            = each.key
-  cluster         = aws_ecs_cluster.micro.id
-  task_definition = aws_ecs_task_definition.svc[each.key].arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
+  for_each              = local.tier_backends
+  name                  = each.key
+  cluster               = aws_ecs_cluster.micro.id
+  task_definition       = aws_ecs_task_definition.svc[each.key].arn
+  desired_count         = 1
+  launch_type           = "FARGATE"
+  wait_for_steady_state = true
 
   network_configuration {
     subnets          = aws_subnet.public[*].id
@@ -230,18 +236,46 @@ resource "aws_ecs_service" "svc" {
     }
   }
 
-  # Só o gateway vai para o ALB.
-  dynamic "load_balancer" {
-    for_each = each.value.alb ? [1] : []
-    content {
-      target_group_arn = aws_lb_target_group.gateway.arn
-      container_name   = each.key
-      container_port   = each.value.port
+  depends_on = [aws_ecs_service.discovery]
+}
+
+# Nível 4 — gateway, depois de os backends estarem estáveis e registrados.
+resource "aws_ecs_service" "gateway" {
+  for_each              = local.tier_gateway
+  name                  = each.key
+  cluster               = aws_ecs_cluster.micro.id
+  task_definition       = aws_ecs_task_definition.svc[each.key].arn
+  desired_count         = 1
+  launch_type           = "FARGATE"
+  wait_for_steady_state = true
+
+  network_configuration {
+    subnets          = aws_subnet.public[*].id
+    security_groups  = [aws_security_group.micro.id]
+    assign_public_ip = true
+  }
+
+  service_connect_configuration {
+    enabled   = true
+    namespace = aws_service_discovery_http_namespace.micro.arn
+    service {
+      port_name      = each.key
+      discovery_name = each.key
+      client_alias {
+        port     = each.value.port
+        dns_name = each.key
+      }
     }
   }
-  health_check_grace_period_seconds = each.value.alb ? 180 : null
 
-  depends_on = [aws_ecs_service.discovery]
+  load_balancer {
+    target_group_arn = aws_lb_target_group.gateway.arn
+    container_name   = each.key
+    container_port   = each.value.port
+  }
+  health_check_grace_period_seconds = 180
+
+  depends_on = [aws_ecs_service.svc]
 }
 
 # --- ALB para o api-gateway ---
