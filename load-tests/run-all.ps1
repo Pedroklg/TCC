@@ -173,7 +173,11 @@ foreach ($s in $scenarios) {
     $ErrorActionPreference = $prevEAP
     Stop-Job $cpuJob -ErrorAction SilentlyContinue
     Remove-Job $cpuJob -Force -ErrorAction SilentlyContinue
-    if ($code -ne 0) { Write-Warning "k6 saiu com código $code em $s/$tag (limiar não atendido?); seguindo." }
+    # 99 é limiar não atendido, que é resultado e não falha. Qualquer outro código
+    # significa repetição sem dados, e seguir produziria baterias vazias que o
+    # resumo reportaria como bem-sucedidas.
+    if ($code -eq 99) { Write-Warning "k6: limiar não atendido em $s/$tag; seguindo." }
+    elseif ($code -ne 0) { throw "k6 falhou em $s/$tag (exit $code)" }
   }
 }
 

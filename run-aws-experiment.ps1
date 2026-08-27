@@ -80,6 +80,8 @@ if ($Quick) {
   # run-all.ps1; reduzir aqui, senão o ensaio estoura o watchdog.
   if (-not $PSBoundParameters.ContainsKey('Reps')) { $Reps = 2 }
 }
+# Pelo mesmo motivo: a calibração é um piloto de uma repetição por braço.
+if ($Calibrate -and -not $PSBoundParameters.ContainsKey('Reps')) { $Reps = 1 }
 
 # Ordem canônica + config de cada braço.
 # targets   = recursos a aplicar com -target. As regras de SG (mysql_from_*) são
@@ -211,8 +213,9 @@ function Invoke-Battery {
       throw "WATCHDOG: bateria '$Label' passou de $TimeoutMin min - abortando (o finally vai destruir)"
     }
   }
-  # run-all tolera limiar k6 não atendido e sai 0; !=0 é anomalia, mas não aborta a sessão.
-  if ($code -ne 0) { Write-Warning "run-all saiu com codigo $code em '$Label'; seguindo." }
+  # run-all sai 0 quando só o limiar não foi atendido; qualquer outro código significa
+  # bateria sem dados, e reportar o braço como ok esconderia isso do resumo.
+  if ($code -ne 0) { throw "bateria '$Label' falhou (run-all exit $code)" }
 }
 
 function Confirm-Teardown {
