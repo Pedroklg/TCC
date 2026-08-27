@@ -42,7 +42,11 @@ $overrides = @{
   ramp     = @()
   spike    = @('-e', 'THINK_MIN=0', '-e', 'THINK_MAX=0', '-e', 'NEW_OWNER_RATIO=0')
   # Calibração é modelo aberto como o pico, e pelo mesmo motivo não cria owners.
-  calibration = @('-e', 'THINK_MIN=0', '-e', 'THINK_MAX=0', '-e', 'NEW_OWNER_RATIO=0')
+  # Também não registra visitas: é uma rampa contínua de dez minutos sem reset, e as
+  # visitas acumuladas inflariam a ficha agregada ao longo do tempo, confundindo o
+  # crescimento do payload com o da taxa de chegada.
+  calibration = @('-e', 'THINK_MIN=0', '-e', 'THINK_MAX=0', '-e', 'NEW_OWNER_RATIO=0',
+                  '-e', 'VISIT_RATIO=0')
 }
 if ($Calibrate -and -not $PSBoundParameters.ContainsKey('Reps')) { $Reps = 1 }
 if ($Quick) {
