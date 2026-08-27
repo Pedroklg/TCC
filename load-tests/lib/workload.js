@@ -31,7 +31,10 @@ export const writeLatency = new Trend('op_write_latency', true);
 export const aggregationVisits = new Rate('agg_visits_present');
 
 const headers = { 'Content-Type': 'application/json' };
-const VISIT_RATIO = Number(__ENV.VISIT_RATIO || 0.2);
+// Baixa de propósito: o reset carrega um volume base de visitas (§3.5), e uma taxa
+// alta faria a ficha agregada crescer durante a própria janela de medição,
+// confundindo o aumento do payload com o da carga oferecida.
+const VISIT_RATIO = Number(__ENV.VISIT_RATIO ?? 0.01);
 // /owners não é paginado: cada owner criado infla toda listagem seguinte.
 const NEW_OWNER_RATIO = Number(__ENV.NEW_OWNER_RATIO ?? 0.01);
 const THINK_MIN = Number(__ENV.THINK_MIN ?? 0.5);

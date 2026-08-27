@@ -9,7 +9,8 @@ param(
   [string]$SshHost = '',              # IP público da EC2 do MySQL (terraform output mysql_public_ip)
   [string]$SshKey = '',               # caminho da chave privada (.pem) do key pair
   [string]$SshUser = 'ec2-user',
-  [string]$DbName = 'petclinic'
+  [string]$DbName = 'petclinic',
+  [int]$VisitsPerPet = 200            # volume base da ficha agregada (§3.5)
 )
 $ErrorActionPreference = 'Stop'
 # $IsWindows não existe no PS 5.1, que só roda no Windows.
@@ -34,7 +35,18 @@ if ($SshHost) {
     & ssh @sshBase "docker exec mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot $DbName < $f'"
     if ($LASTEXITCODE -ne 0) { throw "reset-db remoto: aplicar $f falhou (exit $LASTEXITCODE)" }
   }
-  "reset-db: '$Target' resetado (remoto $SshHost — database '$DbName' recriado do seed)."
+  # 4) volume base de visitas. A semente oficial traz 4 visitas em 13 animais, então
+  # nove dos dez tutores teriam ficha sem visita alguma e a operação de agregação
+  # nasceria trivial, só ganhando conteúdo com as escritas da própria medição.
+  # Data fixa, e não CURDATE(), para o conjunto ser idêntico entre execuções.
+  $seedVisits = "INSERT INTO $DbName.visits (pet_id, visit_date, description) " +
+  "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < $VisitsPerPet) " +
+  "SELECT p.id, DATE_SUB('2024-01-01', INTERVAL n.i DAY), CONCAT('baseline-', n.i) " +
+  "FROM $DbName.pets p, n;"
+  $seedVisits | & ssh @sshBase "docker exec -i mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot'"
+  if ($LASTEXITCODE -ne 0) { throw "reset-db remoto: carga base de visitas falhou (exit $LASTEXITCODE)" }
+  $n = (& ssh @sshBase "docker exec mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot -N -e \""SELECT COUNT(*) FROM $DbName.visits\""'") -join ''
+  "reset-db: '$Target' resetado (remoto $SshHost — '$DbName' do seed + $($n.Trim()) visitas)."
   return
 }
 
@@ -78,4 +90,11 @@ foreach ($f in $cfg.seeds) {
   Get-Content $f -Raw | docker exec -i @pwdArg $c mysql "-u$u" petclinic
 }
 
-"reset-db: '$Target' resetado ($($tables.Count) tabelas, $($cfg.seeds.Count) seed(s))."
+# 4) volume base de visitas, pelo mesmo critério do modo remoto
+$seedVisits = "INSERT INTO visits (pet_id, visit_date, description) " +
+"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < $VisitsPerPet) " +
+"SELECT p.id, DATE_SUB('2024-01-01', INTERVAL n.i DAY), CONCAT('baseline-', n.i) FROM pets p, n;"
+docker exec @pwdArg $c mysql "-u$u" petclinic -e $seedVisits | Out-Null
+$n = docker exec @pwdArg $c mysql "-u$u" petclinic -N -e "SELECT COUNT(*) FROM visits"
+
+"reset-db: '$Target' resetado ($($tables.Count) tabelas, $($cfg.seeds.Count) seed(s), $n visitas)."
