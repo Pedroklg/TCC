@@ -1,8 +1,13 @@
 """Calibração do ponto de saturação (piloto, anterior à campanha definitiva).
 
 Lê results/<alvo>/<ts>/calibration-rep01-raw.json e reconstrói, por patamar de taxa
-de chegada, o throughput atingido, a taxa de erro e o p95. Daí saem o teto de cada
-arquitetura e a taxa de pico a usar no cenário de estresse.
+de chegada, a vazão útil, a taxa de erro e o p95. Daí saem o teto de cada arquitetura
+e a taxa de pico a usar no cenário de estresse.
+
+A taxa oferecida vem do CRONOGRAMA do cenário, não dos dados: o k6 contabiliza uma
+iteração quando ela termina, e sob saturação as iterações abortam cedo, de modo que
+estimá-la pelo que foi concluído devolve valores acima da carga realmente oferecida.
+Os parâmetros abaixo precisam espelhar os de scenario-calibration.js na execução lida.
 
 Como rodar: ver analysis/README.md.
 """
@@ -32,12 +37,30 @@ ORDER = ["mono", "micro", "serverless-cold", "serverless-snap"]
 plt.rcParams.update({"font.size": 12, "axes.titlesize": 12, "axes.labelsize": 12,
                      "legend.fontsize": 10, "xtick.labelsize": 11, "ytick.labelsize": 11})
 
+# Cronograma do cenário (espelha os defaults de scenario-calibration.js).
+START = float(os.environ.get("START_RATE", "10"))
+MAXRATE = float(os.environ.get("MAX_RATE", "1000"))
+STEPS = int(os.environ.get("STEPS", "12"))
+RISE_S = float(os.environ.get("STEP_RISE_S", "10"))
+HOLD_S = float(os.environ.get("STEP_HOLD_S", "40"))
+
 BUCKET_S = int(os.environ.get("CALIB_BUCKET_S", "5"))
 DROP_LEVEL = float(os.environ.get("CALIB_DROP_LEVEL", "0.10"))
-PLATEAU = 0.95    # fração do throughput máximo que define o joelho
-ERR_LEVEL = 5.0   # taxa de erro (%) cujo primeiro cruzamento também é reportado
+PLATEAU = 0.95    # fração da vazão útil máxima que define o joelho
+ERR_LEVEL = 5.0   # taxa de erro (%) cujo cruzamento é reportado
 
 WANTED = {"http_reqs", "http_req_failed", "http_req_duration", "iterations", "dropped_iterations"}
+
+
+def schedule():
+    """Patamares (rate, t_inicio, t_fim) das fases de sustentação, em segundos."""
+    out, t = [], 0.0
+    for i in range(1, STEPS + 1):
+        target = round(START * (MAXRATE / START) ** (i / STEPS))
+        t += RISE_S                      # subida: transitório, descartado
+        out.append((float(target), t, t + HOLD_S))
+        t += HOLD_S
+    return out
 
 
 def _open(path):
@@ -47,7 +70,7 @@ def _open(path):
 
 
 def load_run(path):
-    """Agrega os Points do k6 em janelas de BUCKET_S segundos."""
+    """Agrega os Points do k6 em janelas de BUCKET_S segundos desde o início."""
     rows, t0 = {}, None
     with _open(path) as fh:
         for line in fh:
@@ -82,96 +105,94 @@ def load_run(path):
             out[m] = s.groupby(b).sum()
 
     df = pd.DataFrame(out).fillna(0.0)
-    df["achieved_rps"] = df.get("http_reqs", 0) / BUCKET_S
-    df["iter_done_s"] = df.get("iterations", 0) / BUCKET_S
+    df["t_mid"] = (df.index.to_numpy() + 0.5) * BUCKET_S
+    df["req_s"] = df.get("http_reqs", 0) / BUCKET_S
+    # Vazão ÚTIL: requisição que falhou não é trabalho entregue, e contá-la faria um
+    # sistema em colapso, que responde erro rapidamente, parecer ter o maior teto.
+    df["ok_req_s"] = (df["total"] - df["failed"]) / BUCKET_S
+    df["iter_s"] = df.get("iterations", 0) / BUCKET_S
     df["dropped_s"] = df.get("dropped_iterations", 0) / BUCKET_S
-    # O executor de modelo aberto tenta iniciar as iterações concluídas mais as
-    # descartadas; a soma é a melhor estimativa da taxa oferecida de fato.
-    df["offered_iter_s"] = df["iter_done_s"] + df["dropped_s"]
     df["error_pct"] = 100.0 * df["failed"] / df["total"].replace(0, np.nan)
-    df["drop_frac"] = df["dropped_s"] / df["offered_iter_s"].replace(0, np.nan)
-    reqs_per_iter = df["achieved_rps"].sum() / max(df["iter_done_s"].sum(), 1e-9)
-    df["offered_rps"] = df["offered_iter_s"] * reqs_per_iter
-    return df.reset_index(drop=True), reqs_per_iter
+    df["drop_frac"] = df["dropped_s"] / (df["iter_s"] + df["dropped_s"]).replace(0, np.nan)
+    return df
 
 
 def to_levels(df):
-    """Agrupa as janelas nos patamares de taxa (os degraus são geométricos)."""
-    lv = df[df.offered_rps > 0].copy()
-    if lv.empty:
-        return lv
-    # Arredondar a 2 algarismos significativos reúne as janelas de um mesmo degrau
-    # sem depender do cronograma configurado no cenário.
-    mag = np.floor(np.log10(lv.offered_rps))
-    lv["level"] = (lv.offered_rps / 10 ** (mag - 1)).round() * 10 ** (mag - 1)
-    g = lv.groupby("level").agg(
-        offered_rps=("offered_rps", "median"),
-        achieved_rps=("achieved_rps", "median"),
-        error_pct=("error_pct", "median"),
-        p95_ms=("p95_ms", "median"),
-        drop_frac=("drop_frac", "median"),
-        janelas=("achieved_rps", "size"),
-    ).reset_index(drop=True)
-    return g[g.janelas >= 2].sort_values("offered_rps")
+    """Casa cada janela com o patamar do cronograma; descarta as fases de subida."""
+    recs = []
+    for rate, ini, fim in schedule():
+        w = df[(df.t_mid >= ini) & (df.t_mid < fim)]
+        if len(w) < 2:
+            continue
+        recs.append({
+            "offered_iter_s": rate,
+            "ok_req_s": w.ok_req_s.median(),
+            "req_s": w.req_s.median(),
+            "iter_s": w.iter_s.median(),
+            "error_pct": w.error_pct.median(),
+            "p95_ms": w.p95_ms.median(),
+            "drop_frac": w.drop_frac.fillna(0).median(),
+            "janelas": len(w),
+        })
+    return pd.DataFrame(recs)
 
 
 def saturation(g):
-    """Joelho da curva: menor taxa oferecida que já entrega PLATEAU do teto."""
+    """Joelho: menor taxa oferecida que já entrega PLATEAU da vazão útil máxima."""
     if g.empty:
         return {}
-    peak = g.achieved_rps.max()
-    knee = g[g.achieved_rps >= PLATEAU * peak].offered_rps.min()
-    over = g[g.error_pct >= ERR_LEVEL]
-    # Descarte de iterações não distingue, sozinho, alvo lento de teto de VUs: em
-    # modelo aberto ambos impedem o início de novas iterações. Serve como indício
-    # de saturação, e a distinção exige vus_max e client-cpu.csv da mesma bateria.
-    drops = g[g.drop_frac.fillna(0) >= DROP_LEVEL]
+    peak = g.ok_req_s.max()
+    knee_rows = g[g.ok_req_s >= PLATEAU * peak]
+    knee = knee_rows.offered_iter_s.min()
+    at_knee = g[g.offered_iter_s == knee].iloc[0]
+    # A busca do cruzamento de erro começa no joelho: antes dele, no serverless, o
+    # que aparece é cold start do primeiro patamar, não degradação por carga.
+    after = g[g.offered_iter_s >= knee]
+    over = after[after.error_pct >= ERR_LEVEL]
+    drops = after[after.drop_frac >= DROP_LEVEL]
     return {
-        "teto_rps": round(peak, 1),
-        "saturacao_oferecida_rps": round(knee, 1),
-        "erro5pct_em_rps": round(over.offered_rps.min(), 1) if not over.empty else None,
-        "descarte10pct_em_rps": round(drops.offered_rps.min(), 1) if not drops.empty else None,
+        "teto_ok_req_s": round(peak, 1),
+        "saturacao_iter_s": round(knee, 1),
+        "req_por_iter_no_joelho": round(at_knee.req_s / at_knee.iter_s, 2) if at_knee.iter_s else None,
+        "erro_no_joelho_pct": round(at_knee.error_pct, 2),
+        "p95_no_joelho_ms": round(at_knee.p95_ms, 1),
+        "erro5pct_iter_s": round(over.offered_iter_s.min(), 1) if not over.empty else None,
+        "descarte10pct_iter_s": round(drops.offered_iter_s.min(), 1) if not drops.empty else None,
     }
 
 
-def figure(curves, sm, long):
-    # Dois painéis empilhados sobre o mesmo eixo x. Throughput e taxa de erro têm
-    # unidades e escalas distintas: num eixo y secundário, a escolha das escalas
-    # sugeriria qualquer relação desejada entre as duas curvas.
+def figure(curves, sm):
+    # Dois painéis empilhados sobre o mesmo eixo x. Vazão e taxa de erro têm unidades
+    # e escalas distintas: num eixo y secundário, a escolha das escalas sugeriria
+    # qualquer relação desejada entre as duas curvas.
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 7), sharex=True,
                                    gridspec_kw={"height_ratios": [2, 1]})
-    # Referência y = x: no eixo x logarítmico ela é uma curva, e traçá-la com dois
-    # pontos a deixaria quase horizontal, parecendo um teto. O eixo y fica preso à
-    # faixa dos dados, senão a referência estica a escala e achata as curvas reais.
-    lo, hi = long.offered_rps.min(), long.offered_rps.max()
-    ymax = long.achieved_rps.max() * 1.15
-    xs = np.logspace(np.log10(lo), np.log10(hi), 200)
-    ax1.plot(xs, xs, color="0.75", lw=1, ls=(0, (2, 3)), zorder=1)
-    ax1.set_ylim(0, ymax)
-    ax1.set_xlim(lo, hi)
-    xr = float(np.interp(0.72 * ymax, xs, xs))
-    ax1.annotate("resposta ideal", xy=(xr, 0.72 * ymax), xytext=(6, -2),
-                 textcoords="offset points", ha="left", va="top", color="0.45", fontsize=9)
+    allg = pd.concat(curves.values())
+    lo, hi = allg.offered_iter_s.min(), allg.offered_iter_s.max()
+    ymax = allg.ok_req_s.max() * 1.15
 
     for t, g in curves.items():
         kw = dict(color=COLOR[t], marker=MARK[t], ls=DASH[t], lw=2, ms=6, zorder=3)
-        ax1.plot(g.offered_rps, g.achieved_rps, label=LABEL[t], **kw)
-        ax2.plot(g.offered_rps, g.error_pct, **kw)
-        knee = sm.loc[t, "saturacao_oferecida_rps"] if t in sm.index else None
+        ax1.plot(g.offered_iter_s, g.ok_req_s, label=LABEL[t], **kw)
+        ax2.plot(g.offered_iter_s, g.error_pct, **kw)
+        knee = sm.loc[t, "saturacao_iter_s"] if t in sm.index else None
         if knee is not None and not pd.isna(knee):
-            y = g.loc[(g.offered_rps - knee).abs().idxmin(), "achieved_rps"]
+            y = g.loc[(g.offered_iter_s - knee).abs().idxmin(), "ok_req_s"]
             ax1.plot([knee], [y], marker="*", ms=16, color=COLOR[t],
                      mec="white", mew=1.2, ls="none", zorder=4)
 
-    ax1.set_ylabel("Throughput atingido (req/s)")
     ax1.set_xscale("log")
+    ax1.set_xlim(lo, hi)
+    ax1.set_ylim(0, ymax)
+    ax1.set_ylabel("Vazão útil (req/s, exclui erros)")
     ax1.grid(True, alpha=0.25, lw=0.6)
     ax1.legend(frameon=False, loc="upper left")
     ax1.set_title("Saturação por arquitetura (estrela: ponto de saturação)")
 
     ax2.axhline(ERR_LEVEL, color="0.75", lw=1, ls=(0, (2, 3)), zorder=1)
+    ax2.set_ylim(-3, 103)
     ax2.set_ylabel("Erro (%)")
-    ax2.set_xlabel("Taxa de chegada oferecida (req/s, escala log)")
+    ax2.set_xlabel("Taxa de chegada oferecida (iterações/s, escala log)")
     ax2.grid(True, alpha=0.25, lw=0.6)
 
     fig.tight_layout()
@@ -180,24 +201,22 @@ def figure(curves, sm, long):
 
 
 def main():
-    curves, summary, rpi = {}, [], {}
+    curves, summary = {}, []
     for target in ORDER:
         paths = sorted(glob.glob(os.path.join(RESULTS, target, "*", "calibration-rep01-raw.json*")))
         if not paths:
             continue
         if len(paths) > 1:
             print(f"aviso: {target} tem {len(paths)} calibrações; usando a mais recente")
-        loaded = load_run(paths[-1])
-        if loaded is None:
+        df = load_run(paths[-1])
+        if df is None:
             continue
-        df, r = loaded
-        rpi[target] = r
         g = to_levels(df)
         if g.empty:
             continue
         curves[target] = g
         s = saturation(g)
-        s.update({"alvo": target, "req_por_iteracao": round(r, 2)})
+        s["alvo"] = target
         summary.append(s)
 
     if not curves:
@@ -208,16 +227,17 @@ def main():
     sm = pd.DataFrame(summary).set_index("alvo").reindex([t for t in ORDER if t in curves])
     sm.to_csv(os.path.join(TAB, "calibration_summary.csv"))
 
-    figure(curves, sm, long)
+    figure(curves, sm)
 
-    print("\n=== Calibração: teto por arquitetura ===")
+    print("\n=== Calibração: teto por arquitetura (vazão ÚTIL, erros excluídos) ===")
     print(sm.to_string())
-    if sm["teto_rps"].notna().any():
-        teto = sm["teto_rps"].max()
-        r = float(np.mean(list(rpi.values())))
-        print(f"\nMaior teto observado: {teto:.0f} req/s ({r:.2f} req por iteração)")
-        print(f"PEAK_RATE sugerido para o cenário de pico: {1.5 * teto / r:.0f} iter/s")
-        print("(1,5x o maior teto, para que os três braços ultrapassem a saturação)")
+    fraco = sm["saturacao_iter_s"].min()
+    forte = sm["saturacao_iter_s"].max()
+    print(f"\nMenor ponto de saturação: {fraco:.0f} iter/s   |   maior: {forte:.0f} iter/s"
+          f"   (razão {forte / fraco:.1f}x)")
+    print(f"PEAK_RATE que ultrapassa a saturação de TODOS os braços: {1.5 * forte:.0f} iter/s")
+    print(f"PEAK_RATE que ultrapassa a do braço mais fraco em 1,5x:  {1.5 * fraco:.0f} iter/s")
+    print("\nQuanto maior a razão entre os tetos, menos uma taxa única serve aos dois fins.")
     print(f"\nFigura em {FIG}/calibration.png; tabelas em {TAB}/")
 
 
