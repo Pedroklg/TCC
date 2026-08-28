@@ -1,11 +1,6 @@
 ﻿# Executa os 3 cenários k6 contra um alvo e salva os resultados em /results.
-# Registra também a latência de base do enlace (exigência da seção 3.4 da metodologia)
-# antes de cada bateria — relevante quando o alvo estiver na AWS.
-#
-# Uso:
-#   ./load-tests/run-all.ps1 -Target mono                 # runs definitivos (longos)
-#   ./load-tests/run-all.ps1 -Target mono -Quick          # validação rápida (~1,5 min/alvo)
-#   ./load-tests/run-all.ps1 -Target serverless -BaseUrl https://abc123.execute-api.us-east-1.amazonaws.com/petclinic/api
+# Registra também a latência de base do enlace e a CPU do gerador (seção 3.4 da
+# metodologia) a cada repetição, como covariáveis do ambiente de medição.
 
 param(
   [ValidateSet('mono', 'micro', 'serverless')]
@@ -28,14 +23,12 @@ if (-not $Label) { $Label = $Target }
 $outDir = Join-Path $root "results/$Label/$stamp"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
-# Monta os argumentos -e comuns
 $envArgs = @('-e', "TARGET=$Target")
 if ($BaseUrl) { $envArgs += @('-e', "BASE_URL=$BaseUrl") }
 
 # Overrides de carga por cenário. No modo -Quick reduzimos tudo só para validar
 # que o pipeline de coleta funciona; os valores definitivos ficam nos defaults
 # dos próprios scripts (constante 5m/50 VUs, rampa até 200 VUs, pico 20->300 iter/s — modelo aberto).
-# O pico é modelo aberto (taxa de chegada), sem think time.
 # Pico não cria owners: a listagem cresceria e saturaria o enlace do gerador.
 $overrides = @{
   constant = @()
@@ -50,7 +43,7 @@ $overrides = @{
 }
 if ($Calibrate -and -not $PSBoundParameters.ContainsKey('Reps')) { $Reps = 1 }
 if ($Quick) {
-  if (-not $PSBoundParameters.ContainsKey('Reps')) { $Reps = 2 }  # validação: poucas repetições
+  if (-not $PSBoundParameters.ContainsKey('Reps')) { $Reps = 2 }
   $overrides.constant = @('-e', 'VUS=10', '-e', 'DURATION=30s')
   $overrides.ramp     = @('-e', 'MAX_VUS=30', '-e', 'RAMP_UP=15s', '-e', 'HOLD=15s', '-e', 'RAMP_DOWN=10s')
   $overrides.calibration += @('-e', 'START_RATE=10', '-e', 'MAX_RATE=60', '-e', 'STEPS=3',

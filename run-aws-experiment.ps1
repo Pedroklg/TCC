@@ -15,25 +15,13 @@
   destroy é um `terraform destroy` completo (sem -target): como só o braço atual está
   no state, ele limpa exatamente o que subiu.
 
-  SEGURANÇA DE CUSTO (nível recomendado, sem reaper):
+  SEGURANÇA DE CUSTO:
     - finally: destrói em qualquer saída (sucesso, erro ou Ctrl+C);
     - watchdog: se uma bateria k6 travar e passar do teto de tempo, o script aborta
       sozinho -> cai no finally -> destrói. Cobre o cenário de "k6 pendurado".
     - O Budget (módulo 00-budget) continua sendo o backstop financeiro.
-  NÃO cobre o processo morrer "na marra" (queda de energia / notebook suspendendo).
-  Antes de rodar sem supervisão: powercfg /change standby-timeout-ac 0
-
-.EXAMPLE
-  # Ensaio rápido do pipeline inteiro (sobe, roda pouco, captura, DESTRÓI):
-  ./run-aws-experiment.ps1 -Quick
-
-.EXAMPLE
-  # Rodada definitiva, só o monolito e os microsserviços (deixa serverless p/ depois):
-  ./run-aws-experiment.ps1 -Only mono,micro
-
-.EXAMPLE
-  # Tudo, 10 repetições por cenário (default):
-  ./run-aws-experiment.ps1
+  NÃO cobre o processo morrer "na marra" (queda de energia, sessão encerrada). No
+  runner, o tmux cobre a queda do SSH; ver infra/terraform-runner/README.md.
 
 .NOTES
   Pré-requisitos: aws configure feito; infra/terraform/terraform.tfvars preenchido;
