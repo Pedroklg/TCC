@@ -53,13 +53,20 @@ do experimento liberam k6 e SSH só para ele, então **a partir daqui o notebook
 alcançar os alvos**. Para manter os dois acessos seria preciso transformar `my_ip_cidr`
 em lista.
 
-## 4. Levar o que o `git clone` não traz
+## 4. Levar a árvore e o que ela não versiona
 
-`apps/` não é versionado, e `terraform.tfvars` e os states são ignorados por design.
-São cerca de 160 MB:
+A campanha precisa rodar **o mesmo commit** validado no notebook. Um `git clone` traz o
+branch padrão do GitHub, que pode estar atrás do que se vai executar, e a diferença só
+apareceria como dado degradado horas depois. `git archive` empacota o `HEAD` local e
+elimina esse risco.
+
+Fora da árvore versionada ficam `apps/`, `terraform.tfvars` e os states, ignorados por
+design. Ao todo são cerca de 160 MB:
 
 ```bash
 IP=$(terraform -chdir=infra/terraform-runner output -raw runner_public_ip)
+
+git archive --format=tar --prefix=TCC/ HEAD | gzip > /tmp/tcc-tree.tgz
 
 tar -czf /tmp/runner-payload.tgz \
   apps/monolith/target/spring-petclinic-rest-4.0.2-exec.jar \
@@ -69,7 +76,7 @@ tar -czf /tmp/runner-payload.tgz \
   infra/terraform/terraform.tfvars \
   infra/terraform/00-budget/terraform.tfstate
 
-scp -i tcc-keypair.pem /tmp/runner-payload.tgz tcc-keypair.pem ubuntu@$IP:~/
+scp -i tcc-keypair.pem /tmp/tcc-tree.tgz /tmp/runner-payload.tgz tcc-keypair.pem ubuntu@$IP:~/
 ```
 
 O state do `00-budget` precisa ir junto: sem ele o preflight acusa o budget como não
@@ -83,7 +90,7 @@ ssh -i tcc-keypair.pem ubuntu@$IP
 cat /etc/tcc-runner-ready          # só existe quando o provisionamento terminou
 chmod 600 ~/tcc-keypair.pem
 
-git clone https://github.com/Pedroklg/TCC.git
+tar -xzf ~/tcc-tree.tgz
 cd TCC
 tar -xzf ~/runner-payload.tgz
 
@@ -126,7 +133,7 @@ find results \( -name '*-summary.json' -o -name 'baseline-latency.csv' \
   -o -name 'client-cpu.csv' -o -name 'run-metadata.json' \) | tar -czf - -T - \
   | aws s3 cp - s3://$BUCKET/summaries.tgz
 
-# JSON bruto comprimido, para poder reprocessar depois (~30 GB -> ~3 GB)
+# JSON bruto comprimido, para poder reprocessar depois (o piloto comprimiu 33x)
 tar -czf - results | aws s3 cp - s3://$BUCKET/raw.tgz
 ```
 
