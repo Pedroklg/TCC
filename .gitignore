@@ -24,6 +24,11 @@ samconfig.toml
 # Documento de planejamento interno (não publicado)
 docs/fase7-aws.md
 
+# Instruções locais do agente, resultados de execuções locais e provas de figura
+/CLAUDE.md
+/results-local/
+/fig-preview/
+
 # Misc
 *.log
 ~$*.docx
