@@ -29,6 +29,18 @@ export const writeLatency = new Trend('op_write_latency', true);
 // breaker cujo fallback devolve visitas vazias: a agregação responde 200 sem ter
 // agregado. Sem esta taxa, a degradação passa despercebida sob carga.
 export const aggregationVisits = new Rate('agg_visits_present');
+// Presença de visita não basta: se um braço agregar menos visitas que outro, a
+// operação discriminante deixa de ser a mesma nos dois e comparar sua latência
+// passa a comparar trabalhos diferentes.
+export const aggregationVisitCount = new Trend('agg_visit_count');
+// A listagem do monolito embute as visitas de cada animal; a dos microsserviços
+// não, porque as visitas vivem em outro serviço. Sem medir o corpo por operação,
+// a diferença de latência entre os braços se confunde com a de volume trafegado.
+export const responseBytes = new Trend('op_response_bytes');
+
+function recordBytes(res, op) {
+  responseBytes.add(res.body ? res.body.length : 0, { op });
+}
 
 const headers = { 'Content-Type': 'application/json' };
 // Baixa de propósito: o reset carrega um volume base de visitas (§3.5), e uma taxa
@@ -58,6 +70,7 @@ export function vuLoop() {
   // 1) Navegação: lista de owners
   const listRes = http.get(`${base}${r.listOwners()}`, { tags: { op: 'listOwners' } });
   check(listRes, { 'listOwners 200': (res) => res.status === 200 });
+  recordBytes(listRes, 'listOwners');
 
   let owners = [];
   try {
@@ -83,12 +96,14 @@ export function vuLoop() {
       },
     });
     ownerDetailLatency.add(detail.timings.duration);
+    recordBytes(detail, 'ownerDetail');
 
     let visitCount = 0;
     try {
       (detail.json('pets') || []).forEach((p) => { visitCount += (p.visits || []).length; });
     } catch (e) { /* corpo inesperado */ }
     aggregationVisits.add(visitCount > 0);
+    aggregationVisitCount.add(visitCount);
 
     // 3) Escrita realista pós-consulta: agenda visita em um pet desse owner
     let pets = [];
@@ -100,12 +115,17 @@ export function vuLoop() {
         { headers, tags: { op: 'createVisit' } });
       check(res, { 'createVisit 2xx': (x) => x.status >= 200 && x.status < 300 });
       writeLatency.add(res.timings.duration);
+      recordBytes(res, 'createVisit');
     }
   }
 
   // 4) Reads leves ocasionais
-  if (Math.random() < 0.3) http.get(`${base}${r.listVets()}`, { tags: { op: 'listVets' } });
-  if (Math.random() < 0.2) http.get(`${base}${r.listPetTypes()}`, { tags: { op: 'listPetTypes' } });
+  if (Math.random() < 0.3) {
+    recordBytes(http.get(`${base}${r.listVets()}`, { tags: { op: 'listVets' } }), 'listVets');
+  }
+  if (Math.random() < 0.2) {
+    recordBytes(http.get(`${base}${r.listPetTypes()}`, { tags: { op: 'listPetTypes' } }), 'listPetTypes');
+  }
 
   // 5) Escrita ocasional no customers-service (cadastro de owner)
   if (Math.random() < NEW_OWNER_RATIO) {
@@ -117,6 +137,7 @@ export function vuLoop() {
       { headers, tags: { op: 'createOwner' } });
     check(res, { 'createOwner 2xx': (x) => x.status >= 200 && x.status < 300 });
     writeLatency.add(res.timings.duration);
+    recordBytes(res, 'createOwner');
   }
 
   thinkTime();

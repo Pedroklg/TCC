@@ -631,6 +631,11 @@ def run_conditions():
                 # queda desta taxa sob carga = circuit breaker do gateway abrindo e
                 # devolvendo visitas vazias, ou seja, agregação que não agregou
                 "agg_visits_present": mt.get("agg_visits_present", {}).get("value", np.nan),
+                # quantas visitas a ficha trouxe: se um braço agrega menos que outro,
+                # a operação discriminante não é a mesma nos dois
+                "agg_visit_count_med": mt.get("agg_visit_count", {}).get("med", np.nan),
+                # corpo médio das respostas; o detalhamento por operação fica no bruto
+                "resp_bytes_avg": mt.get("op_response_bytes", {}).get("avg", np.nan),
                 "rtt_min_ms": np.nan, "client_cpu_avg_pct": np.nan, "client_cpu_max_pct": np.nan,
             }
             if rtt is not None and {"scenario", "rep"} <= set(rtt.columns):
