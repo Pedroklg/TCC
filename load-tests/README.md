@@ -70,8 +70,12 @@ k6 run -e TARGET=mono -e VUS=50 -e DURATION=5m load-tests/scenario-constant.js
 
 | Flag | Efeito |
 |---|---|
+| `-Target` / `-BaseUrl` | arquitetura sob teste e endpoint (obrigatório na AWS) |
+| `-Label` | nome da pasta em `results/`; separa `serverless-cold` de `serverless-snap` |
 | `-Reps N` | repete cada cenário N vezes (tratamento estatístico — seção 3.6) |
-| `-ResetBetweenReps` | TRUNCATE+reseed do MySQL antes de cada rep (baseline idêntico; local) |
+| `-ResetBetweenReps` | repõe o MySQL ao estado-semente antes de cada rep, com o volume base de visitas (§3.5) |
+| `-DbSshHost` / `-DbSshKey` | na AWS, faz esse reset por SSH na EC2 do banco |
+| `-Calibrate` | roda só o cenário de calibração do ponto de saturação |
 | `-Quick` | durações/VUs reduzidos só para validar o pipeline |
 
 ## Parâmetros (variáveis `-e`)
@@ -83,11 +87,14 @@ k6 run -e TARGET=mono -e VUS=50 -e DURATION=5m load-tests/scenario-constant.js
 | `MAX_VUS` | `200` | rampa |
 | `BASE_RATE` / `PEAK_RATE` | `20` / `300` (iter/s) | pico (modelo aberto) |
 | `PREALLOC_VUS` / `MAX_VUS` | `100` / `800` | pico |
-| `VISIT_RATIO` / `NEW_OWNER_RATIO` | `0.2` / `0.05` | mix de escrita |
+| `VISIT_RATIO` / `NEW_OWNER_RATIO` | `0.01` / `0.01` | mix de escrita |
 | `THINK_MIN` / `THINK_MAX` | `0.5` / `2.0` s | think time (0 no pico) |
 
-> Os valores padrão são pontos de partida. Os números definitivos (VUs, taxas,
-> durações) devem ser calibrados após o dry run e registrados no Capítulo 4.
+> `MAX_VUS` é lido pelos dois cenários com sentidos distintos: alvo de VUs na rampa,
+> teto de VUs no pico. Defini-la globalmente afeta ambos.
+>
+> `PEAK_RATE` não foi arbitrado: saiu do cenário de calibração (`-Calibrate`), que mede
+> o teto de cada arquitetura. Ver `analysis/README.md`.
 
 ## Serverless — cold start × warm start
 
