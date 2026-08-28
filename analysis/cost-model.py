@@ -40,7 +40,7 @@ SUBORDER = ["sem-otim", "snapstart"]
 SUBLAB = {"sem-otim": "sem otimização", "snapstart": "SnapStart"}
 SUBCOLOR = {"sem-otim": "tab:green", "snapstart": "tab:purple"}
 
-# --- Preços us-east-1 (USD), consultados em 18 jul. 2026 — RECONFERIR na execução ---
+# --- Preços us-east-1 (USD), verificados em 28 ago. 2026 na AWS Price List API ---
 P = {
     "ec2_c5_large_hr": 0.085,       # monolito (c5.large, 2 vCPU/4 GB)
     "ec2_m5_large_hr": 0.096,       # MySQL (m5.large, 2 vCPU/8 GB)
@@ -53,15 +53,15 @@ P = {
     "apigw_req": 1.00 / 1_000_000,  # API Gateway HTTP (até 300 M/mês)
 }
 
-# Fatores de desconto por compromisso sobre o preço sob demanda (compute apenas).
-# PLACEHOLDERS plausíveis — confirmar na página oficial na data da análise e
-# registrar prazo/forma de pagamento (ex.: RI padrão 1 ano sem adiantamento).
+# Fatores de desconto por compromisso sobre o preço sob demanda (compute apenas),
+# sempre na forma SEM ADIANTAMENTO: RI padrão para EC2 (fator do c5.large; o do
+# m5.large difere menos de um ponto percentual) e Compute Savings Plans para Fargate.
 # O desconto do Lambda via Compute Savings Plans (~17%) é ignorado: simplificação
 # conservadora CONTRA o serverless no break-even.
 PRICING_MODES = {
-    "on-demand": {"ec2": 1.00, "fargate": 1.00},
-    "ri-1y":     {"ec2": 0.64, "fargate": 0.80},
-    "ri-3y":     {"ec2": 0.42, "fargate": 0.50},
+    "on-demand": {"ec2": 1.000, "fargate": 1.00},
+    "ri-1y":     {"ec2": 0.635, "fargate": 0.80},
+    "ri-3y":     {"ec2": 0.424, "fargate": 0.55},
 }
 
 # --- Dimensionamento (Quadro 2) ---
