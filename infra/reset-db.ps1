@@ -20,6 +20,25 @@ if ($OnWindows) {
   $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
 }
 
+# Logo após o cenário de pico centenas de ambientes de execução Lambda ainda seguram
+# conexões do próprio pool, e o banco recusa novas com o erro 1040. A espera dá tempo
+# de o provedor reciclá-los; sem ela, uma exaustão passageira derruba a bateria inteira
+# e as repetições restantes do braço se perdem.
+function Invoke-RemoteMysql {
+  param([string[]]$SshArgs, [string]$Remote, [string]$Stdin = '', [string]$Step = '',
+    [int]$Retries = 6)
+  for ($i = 1; $i -le $Retries; $i++) {
+    if ($Stdin) { $Stdin | & ssh @SshArgs $Remote } else { & ssh @SshArgs $Remote }
+    if ($LASTEXITCODE -eq 0) { return }
+    if ($i -lt $Retries) {
+      $wait = 15 * $i
+      Write-Warning "reset-db: '$Step' falhou (exit $LASTEXITCODE); nova tentativa em $wait s ($i/$Retries)"
+      Start-Sleep -Seconds $wait
+    }
+  }
+  throw "reset-db remoto: '$Step' falhou apos $Retries tentativas (exit $LASTEXITCODE)"
+}
+
 # --- Modo REMOTO (AWS): recria o database a partir do seed persistido no contêiner ---
 if ($SshHost) {
   if (-not $SshKey) { throw "reset-db remoto: informe -SshKey (chave .pem do key pair)" }
@@ -27,13 +46,13 @@ if ($SshHost) {
   if (-not $OnWindows) { & chmod 600 $SshKey }
   $sshBase = @('-i', $SshKey, '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=15', "$SshUser@$SshHost")
   # 1) DROP + CREATE via stdin (evita aspas aninhadas Windows->ssh->sh)
-  "DROP DATABASE IF EXISTS $DbName; CREATE DATABASE $DbName;" |
-    & ssh @sshBase "docker exec -i mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot'"
-  if ($LASTEXITCODE -ne 0) { throw "reset-db remoto: DROP/CREATE falhou (exit $LASTEXITCODE)" }
+  Invoke-RemoteMysql -SshArgs $sshBase -Step 'DROP/CREATE' `
+    -Stdin "DROP DATABASE IF EXISTS $DbName; CREATE DATABASE $DbName;" `
+    -Remote "docker exec -i mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot'"
   # 2) schema + 3) data — arquivos já dentro do contêiner (mysql-userdata.sh)
   foreach ($f in '/schema.sql', '/data.sql') {
-    & ssh @sshBase "docker exec mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot $DbName < $f'"
-    if ($LASTEXITCODE -ne 0) { throw "reset-db remoto: aplicar $f falhou (exit $LASTEXITCODE)" }
+    Invoke-RemoteMysql -SshArgs $sshBase -Step "aplicar $f" `
+      -Remote "docker exec mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot $DbName < $f'"
   }
   # 4) volume base de visitas. A semente oficial traz 4 visitas em 13 animais, então
   # nove dos dez tutores teriam ficha sem visita alguma e a operação de agregação
@@ -43,8 +62,8 @@ if ($SshHost) {
   "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < $VisitsPerPet) " +
   "SELECT p.id, DATE_SUB('2024-01-01', INTERVAL n.i DAY), CONCAT('baseline-', n.i) " +
   "FROM $DbName.pets p, n;"
-  $seedVisits | & ssh @sshBase "docker exec -i mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot'"
-  if ($LASTEXITCODE -ne 0) { throw "reset-db remoto: carga base de visitas falhou (exit $LASTEXITCODE)" }
+  Invoke-RemoteMysql -SshArgs $sshBase -Step 'carga base de visitas' -Stdin $seedVisits `
+    -Remote "docker exec -i mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot'"
   $n = (& ssh @sshBase "docker exec mysql sh -c 'MYSQL_PWD=`$MYSQL_ROOT_PASSWORD mysql -uroot -N -e \""SELECT COUNT(*) FROM $DbName.visits\""'") -join ''
   "reset-db: '$Target' resetado (remoto $SshHost — '$DbName' do seed + $($n.Trim()) visitas)."
   return

@@ -7,12 +7,19 @@ dnf install -y docker
 command -v aws >/dev/null 2>&1 || dnf install -y awscli
 systemctl enable --now docker
 
+# max-connections dimensionado pelo pior caso do serverless: cada ambiente de
+# execução Lambda abre seu próprio pool, e sob a taxa de pico centenas deles
+# coexistem. Com o teto anterior de 1.000 o banco compartilhado saturava antes
+# das arquiteturas e o braço serverless media o limite do MySQL, não o seu.
+# O ulimit acompanha: o servidor precisa de um descritor por conexão e pararia
+# no limite padrão do contêiner muito antes de chegar ao novo teto.
 docker run -d --name mysql --restart always -p 3306:3306 \
+  --ulimit nofile=16384:16384 \
   -e MYSQL_ROOT_PASSWORD=${db_password} \
   -e MYSQL_DATABASE=${db_name} \
   -e MYSQL_USER=${db_user} \
   -e MYSQL_PASSWORD=${db_password} \
-  mysql:8.4 --mysql-native-password=ON --max-connections=1000
+  mysql:8.4 --mysql-native-password=ON --max-connections=4000
 
 # Espera o servidor definitivo. O entrypoint sobe um servidor temporário para
 # inicializar o banco, e 'mysqladmin ping' já responde a ele — semear nessa fase
