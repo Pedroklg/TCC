@@ -18,18 +18,19 @@ parametrizáveis. A duração COBRADA (Billed Duration) vem da captura de cold s
 ambiente. Atualizar preços/descontos na data da análise (fontes na Tabela de
 preços da monografia, seção 3.6).
 
-Uso:  python analysis/cost-model.py
+Uso:  python analysis/cost-model.py [results_dir] [output_dir]
       LAMBDA_BILLED_WARM_S=0.05 COLD_FRACTION=0.01 python analysis/cost-model.py
 """
 import os
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-OUT = "analysis"
-RES = "results"
+RES = sys.argv[1] if len(sys.argv) > 1 else "results"
+OUT = sys.argv[2] if len(sys.argv) > 2 else "analysis"
 FIG, TAB = os.path.join(OUT, "figures"), os.path.join(OUT, "tables")
 os.makedirs(FIG, exist_ok=True)
 os.makedirs(TAB, exist_ok=True)
@@ -116,12 +117,17 @@ def load_cold_fraction():
             for _, r in df.iterrows() if pd.notna(r.get("cold_fraction", np.nan))}
 
 
-def load_avg_resp_kb():
-    """Tamanho médio de resposta (KB/req) dos summaries do k6 — dimensão de bytes da LCU."""
+def load_avg_resp_kb(arm="micro"):
+    """Tamanho médio de resposta (KB/req) dos summaries do k6 — dimensão de bytes da LCU.
+
+    Lê só o braço dos microsserviços: o ALB existe apenas nele, e a listagem dos
+    microsserviços não embute as visitas, então trafega cerca de um décimo do corpo
+    dos outros braços. A média dos três multiplicaria por nove a parcela de bytes da
+    LCU de um balanceador que só um deles paga."""
     import glob as _glob
     import json as _json
     total_bytes, total_reqs = 0.0, 0.0
-    for p in _glob.glob(os.path.join(RES, "*", "*", "*-summary.json")):
+    for p in _glob.glob(os.path.join(RES, arm, "*", "*-summary.json")):
         try:
             with open(p, encoding="utf-8") as f:
                 m = _json.load(f).get("metrics", {})
@@ -380,6 +386,11 @@ def table_efficiency(subs, frac):
     if col not in sat.columns or "target" not in sat.columns:
         print(f"[custo-eficiência] colunas esperadas ausentes em {path} — pulado.")
         return None
+    # Vazão útil quando houver: sob estresse o disjuntor dos microsserviços responde
+    # 200 com a ficha vazia, e dividir o custo por uma capacidade que inclui essas
+    # respostas faria a arquitetura parecer mais barata por trabalho entregue.
+    if "vazao_util_max_rps" in sat.columns:
+        sat[col] = sat["vazao_util_max_rps"].fillna(sat[col])
     xstar = sat.groupby("target")[col].max()
     base = cost(1e6)  # parcela fixa domina; volume irrelevante p/ contínuas
     rows = []
@@ -413,6 +424,17 @@ def main():
     measured = load_coldstart_measured()
     frac = apply_measured_overrides(measured)
     reqs = np.logspace(5, 9, 300)  # 100 mil a 1 bilhão de req/mês
+
+    par = pd.DataFrame([
+        {"parametro": "d_quente (mediana cobrada)", "valor": round(BILLED_WARM_S, 4), "unidade": "s"},
+        {"parametro": "d_quente (p95 cobrado)", "valor": round(BILLED_P95_S, 4), "unidade": "s"},
+        {"parametro": "d_extra (acréscimo do cold)", "valor": round(COLD_EXTRA_S, 4), "unidade": "s"},
+        {"parametro": "f_fria observada", "valor": COLD_FRACTION, "unidade": "fração"},
+        {"parametro": "corpo médio (braço com ALB)", "valor": round(AVG_RESP_KB, 2), "unidade": "KB/req"},
+    ])
+    par.to_csv(os.path.join(TAB, "cost_model_params.csv"), index=False)
+    print("=== Parâmetros medidos usados no modelo ===")
+    print(par.to_string(index=False))
 
     subs = subscenario_params(measured)
     be = fig_breakeven_band(reqs, subs, frac)
@@ -454,9 +476,9 @@ def main():
     print("\nNotas: MySQL sempre ligado é custo COMUM às três (piso fixo) — não desloca o "
           "break-even nem o mapa de decisão, mas domina o custo por requisição em volume "
           "baixo. A tabela por perfil e o mapa de decisão usam o subcenário sem otimização "
-          "(caso conservador). Fatores de desconto (ri-1y/ri-3y) são placeholders — "
-          "confirmar prazo/forma de pagamento na data da análise. Duração cobrada: usar "
-          "Billed Duration medida (coldstart-capture) antes do Cap. 4.")
+          "(caso conservador). Os fatores de desconto foram conferidos na Price List API e "
+          "nos Savings Plans (28 ago. 2026), sempre na forma sem adiantamento. A duração "
+          "cobrada e a fração fria vêm da campanha, não dos defaults do script.")
     print(f"Figuras em {FIG}/ | Tabelas em {TAB}/")
 
 
