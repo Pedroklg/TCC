@@ -79,6 +79,10 @@ COLD_FRACTION = float(ENV("COLD_FRACTION", "0.01"))          # f_fria no tráfeg
 COLD_FRACTION_SENS = [float(x) for x in ENV("COLD_FRACTION_SENS", "0.0001,0.01,0.10").split(",")]
 COLD_EXTRA_S = float(ENV("COLD_EXTRA_S", "2.0"))             # d_extra por invocação fria
 AVG_RESP_KB = float(ENV("AVG_RESP_KB", "5"))                 # p/ dimensão de bytes da LCU
+# Dias (UTC) em que a campanha definitiva rodou. Sem esta lista a atribuição por
+# arquitetura soma o período inteiro do CSV, que inclui ensaios e execuções
+# descartadas, e superestima o braço que mais consumiu.
+CAMPAIGN_DAYS = [d.strip() for d in ENV("BILLING_CAMPAIGN_DAYS", "").split(",") if d.strip()]
 
 # O MySQL é compartilhado pelas três (sempre ligado) — custo COMUM.
 MYSQL_MONTH = P["ec2_m5_large_hr"] * HOURS_MONTH
@@ -485,16 +489,68 @@ def billing_validation():
     val = pd.DataFrame(val).sort_values("custo_usd", ascending=False)
     val.to_csv(os.path.join(TAB, "billing_validation.csv"), index=False)
 
+    # A atribuição por arquitetura, ao contrário da validação de preços, depende de
+    # QUANDO cada braço rodou: o CSV cobre todo o período capturado.
+    dias = df[df["data"].isin(CAMPAIGN_DAYS)] if CAMPAIGN_DAYS else df
+    escopo = ("campanha definitiva" if CAMPAIGN_DAYS
+              else "período completo (inclui ensaios e execuções descartadas)")
+    gd = dias.groupby("usage_type")["custo_usd"].sum()
     braco = []
-    for _, r in g.iterrows():
-        m = BILLING_MAP.get(r["usage_type"])
-        rot = m[0] if m else f"fora do modelo: {BILLING_FORA.get(r['usage_type'], 'outros')}"
-        braco.append({"rotulo": rot, "custo_usd": r["custo_usd"]})
-    bd = (pd.DataFrame(braco).groupby("rotulo")["custo_usd"].sum()
-          .round(4).sort_values(ascending=False).reset_index())
+    for ut, custo in gd.items():
+        m = BILLING_MAP.get(ut)
+        rot = m[0] if m else f"fora do modelo: {BILLING_FORA.get(ut, 'outros')}"
+        braco.append({"rotulo": rot, "custo_usd": custo})
+    bd = pd.DataFrame(braco).groupby("rotulo")["custo_usd"].sum().reset_index()
+
+    # O dia do braço serverless mistura a campanha definitiva com a que foi descartada,
+    # e as duas não são separáveis pelo Cost Explorer sem granularidade horária, que é
+    # opt-in da conta pagadora. Substitui-se, então, o valor faturado pela quantidade
+    # medida no CloudWatch, avaliada aos mesmos preços unitários já conferidos acima.
+    med = _lambda_medido()
+    if med is not None:
+        inv, gbs = med
+        bd = bd[bd["rotulo"] != "Serverless"]
+        bd = pd.concat([bd, pd.DataFrame([{
+            "rotulo": "Serverless",
+            "custo_usd": gbs * P["lambda_gb_s"] + inv * (P["lambda_req"] + P["apigw_req"])}])],
+            ignore_index=True)
+    bd["custo_usd"] = bd["custo_usd"].round(4)
+    bd = bd.sort_values("custo_usd", ascending=False).reset_index(drop=True)
     bd["pct_do_uso"] = (100 * bd["custo_usd"] / bd["custo_usd"].sum()).round(1)
+
+    # O escopo não é o mesmo em todas as linhas, e tratá-las como iguais atribuiria à
+    # campanha um consumo que não foi dela. Só o serverless vem de quantidade medida;
+    # monolito e microsserviços vêm do dia em que foram os únicos a usar seus serviços;
+    # as parcelas fora do modelo são compartilhadas e não se separam por execução.
+    def _escopo(rot):
+        if not CAMPAIGN_DAYS:
+            return "período completo do CSV"
+        if rot == "Serverless":
+            return "medido no CloudWatch (só a definitiva)"
+        if rot == "Monolito" or rot == "Microsserviços":
+            # Nos dias em que rodaram, foram os únicos a usar seus próprios serviços.
+            return "dia do braço (só a definitiva)"
+        # O SGBD ficou de pé durante todas as execuções, e o mesmo vale para as
+        # parcelas fora do modelo: não se separam por execução.
+        return "dias da campanha (inclui execuções descartadas)"
+
+    bd["escopo"] = bd["rotulo"].map(_escopo)
     bd.to_csv(os.path.join(TAB, "billing_by_arm.csv"), index=False)
     return val, bd
+
+
+def _lambda_medido():
+    """Invocações e GB-segundo do braço serverless na campanha, do CloudWatch."""
+    path = os.path.join(RES, "resources", "lambda-invocacoes-por-funcao.csv")
+    if not os.path.exists(path):
+        return None
+    try:
+        d = pd.read_csv(path)
+    except (OSError, ValueError):
+        return None
+    if "duracao_soma_ms" not in d.columns:
+        return None
+    return float(d["invocacoes"].sum()), float((d["duracao_soma_ms"] / 1000 * (d["memoria_mb"] / 1024)).sum())
 
 
 def main():

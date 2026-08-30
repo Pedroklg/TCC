@@ -102,5 +102,13 @@ mão (requer `aws configure` feito):
 .\analysis\billing-capture.ps1 -Start 2026-08-27 -End 2026-08-31
 ```
 
+Na atribuição do custo por arquitetura, informe os dias (UTC) da campanha definitiva;
+sem eles o `cost-model.py` soma o período inteiro do CSV, que inclui ensaios e
+execuções descartadas:
+
+```bash
+BILLING_CAMPAIGN_DAYS=2026-08-28,2026-08-29 python analysis/cost-model.py
+```
+
 O `coldstart-capture.ps1` precisa de permissão para `lambda:*` e
 `logs:FilterLogEvents`.
