@@ -1,14 +1,12 @@
 # Captura o custo faturado no período do experimento (AWS Cost Explorer), para a
 # validação empírica do modelo de custo (§3.6) -> results/resources/billing-usage-type.csv.
 #
-# O detalhamento é por tipo de uso, e não por serviço: é o tipo de uso que carrega a
-# quantidade faturada (horas, GB-segundo, requisições) e permite dividir o custo pelo
-# preço unitário para confrontá-lo com a Tabela de preços da monografia.
+# O detalhamento é por tipo de uso, e não por serviço: só o tipo de uso carrega a
+# quantidade faturada (horas, GB-segundo, requisições), sem a qual não se chega ao
+# preço unitário que a Tabela de preços da monografia declara.
 #
-# Exige que a tag de alocação de custo esteja ATIVA antes do gasto: a ativação não é
-# retroativa, e o que foi consumido antes dela aparece sem tag.
-#
-# Cada consulta ao Cost Explorer é tarifada (USD 0,01 por requisição na data desta análise).
+# A tag de alocação de custo precisa estar ATIVA antes do gasto: a ativação não é
+# retroativa. Cada consulta ao Cost Explorer é tarifada.
 #
 # Como rodar: ver analysis/README.md.
 

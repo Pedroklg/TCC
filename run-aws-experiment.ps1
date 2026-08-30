@@ -183,8 +183,8 @@ function Invoke-Battery {
     # console, então o output do k6 continua aparecendo ao vivo.
     $p = Start-Process -FilePath 'powershell.exe' `
       -ArgumentList (@('-ExecutionPolicy', 'Bypass') + $a) -NoNewWindow -PassThru
-    # Sem reter o handle nativo, o objeto de Start-Process nao expoe o ExitCode e
-    # qualquer codigo de saida viria vazio, indistinguivel de sucesso.
+    # Sem reter o handle nativo, o objeto de Start-Process não expõe o ExitCode e
+    # qualquer código de saída viria vazio, indistinguível de sucesso.
     $null = $p.Handle
     if (-not $p.WaitForExit($TimeoutMin * 60 * 1000)) {
       try { $p.Kill() } catch { }
@@ -245,7 +245,7 @@ function Invoke-Capture {
         $cold = $fns | ForEach-Object { "$Prefix-cold-$_" }
         $snap = $fns | ForEach-Object { "$Prefix-snap-$_" }
         & $CwCapture -Start $s -End $e -LambdaFunctions ($cold + $snap) -OutCsv 'results/resources/usage-serverless.csv'
-        # Cold start: subconjunto representativo (2 funcoes) p/ economizar tempo/custo.
+        # Cold start: subconjunto representativo (2 funções) p/ economizar tempo/custo.
         & $ColdCapture -Subscenario 'sem-otim' `
           -Functions @("$Prefix-cold-getAllOwners", "$Prefix-cold-getOwnerById") `
           -Reps $ColdReps -WarmPerCold $WarmPerCold
@@ -278,8 +278,8 @@ function Test-Preflight {
   if ($LASTEXITCODE -ne 0) { throw "Credenciais AWS ausentes/invalidas. Rode: aws configure" }
 
   if (-not $SkipBudgetCheck) {
-    # Consulta a conta, nao o state local do 00-budget: o state nao e versionado e
-    # nao existe em maquina nova, mas o que a regra exige e o alerta existir.
+    # Consulta a conta, não o state local do 00-budget: o state não é versionado e
+    # não existe em máquina nova, mas o que a regra exige é o alerta existir.
     $acct = & aws sts get-caller-identity --query Account --output text 2>$null
     $b = & aws budgets describe-budgets --account-id $acct --query 'Budgets[].BudgetName' --output text 2>$null
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($b)) {
@@ -326,7 +326,7 @@ try {
     $createdMaybe = $false
     $status = 'ok'
     try {
-      # 1. APPLY (so este braco). A partir daqui pode ter criado recurso -> destroy garantido.
+      # 1. APPLY (só este braço). A partir daqui pode ter criado recurso -> destroy garantido.
       $createdMaybe = $true
       $targs = @('apply', '-input=false', '-auto-approve') + ($cfg.targets | ForEach-Object { "-target=$_" })
       Write-Host "apply: $($cfg.targets -join ', ')" -ForegroundColor DarkGray
@@ -344,7 +344,7 @@ try {
       }
       $winEnd = Get-Date
 
-      # 4. captura (nao-critica)
+      # 4. captura (não crítica)
       Invoke-Capture -Arch $arch -WinStart $winStart -WinEnd $winEnd
     }
     catch {
@@ -352,7 +352,7 @@ try {
       Write-Warning "Braco '$arch' $status"
     }
     finally {
-      # 5. TEARDOWN — sempre, mesmo em erro/Ctrl+C. Destroy completo (so o braco atual no state).
+      # 5. TEARDOWN — sempre, mesmo em erro/Ctrl+C. Destroy completo (só o braço atual no state).
       if ($createdMaybe) {
         Write-Host "teardown '$arch'..." -ForegroundColor Yellow
         try { Invoke-Terraform @('destroy', '-input=false', '-auto-approve'); Confirm-Teardown }

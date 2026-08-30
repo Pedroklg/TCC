@@ -424,20 +424,20 @@ def table_efficiency(subs, frac):
     return eff
 
 
-# Tipos de uso do Cost Explorer que correspondem a um preco da Tabela 3, e o braco a
-# que pertencem. O SGBD entra a parte por ser piso comum as tres (secao 3.6).
+# Tipos de uso do Cost Explorer que correspondem a um preço da Tabela 3, e o braço a
+# que pertencem. O SGBD entra à parte por ser piso comum às três (seção 3.6).
 BILLING_MAP = {
-    "BoxUsage:c5.large":              ("Monolito", "ec2_c5_large_hr", 1),
-    "USE1-Fargate-vCPU-Hours:perCPU": ("Microsserviços", "fargate_vcpu_hr", 1),
-    "USE1-Fargate-GB-Hours":          ("Microsserviços", "fargate_gb_hr", 1),
-    "LoadBalancerUsage":              ("Microsserviços", "alb_hr", 1),
-    "LCUUsage":                       ("Microsserviços", "alb_lcu_hr", 1),
-    "Lambda-GB-Second":               ("Serverless", "lambda_gb_s", 1),
-    "Request":                        ("Serverless", "lambda_req", 1),
-    "USE1-ApiGatewayHttpRequest":     ("Serverless", "apigw_req", 1),
-    "BoxUsage:m5.large":              ("SGBD (comum)", "ec2_m5_large_hr", 1),
+    "BoxUsage:c5.large":              ("Monolito", "ec2_c5_large_hr"),
+    "USE1-Fargate-vCPU-Hours:perCPU": ("Microsserviços", "fargate_vcpu_hr"),
+    "USE1-Fargate-GB-Hours":          ("Microsserviços", "fargate_gb_hr"),
+    "LoadBalancerUsage":              ("Microsserviços", "alb_hr"),
+    "LCUUsage":                       ("Microsserviços", "alb_lcu_hr"),
+    "Lambda-GB-Second":               ("Serverless", "lambda_gb_s"),
+    "Request":                        ("Serverless", "lambda_req"),
+    "USE1-ApiGatewayHttpRequest":     ("Serverless", "apigw_req"),
+    "BoxUsage:m5.large":              ("SGBD (comum)", "ec2_m5_large_hr"),
 }
-# Fora do modelo por decisao declarada na secao 3.6, com o motivo de cada exclusao.
+# Fora do modelo por decisão declarada na seção 3.6, com o motivo de cada exclusão.
 BILLING_FORA = {
     "DataTransfer-Out-Bytes": "transferência de dados",
     "DataTransfer-Regional-Bytes": "transferência de dados",
@@ -478,7 +478,7 @@ def billing_validation():
         m = BILLING_MAP.get(r["usage_type"])
         if not m or not r["quantidade"]:
             continue
-        arq, chave, _ = m
+        arq, chave = m
         p_mod, p_fat = P[chave], r["custo_usd"] / r["quantidade"]
         dev = 100 * (p_fat - p_mod) / p_mod if p_mod else np.nan
         val.append({"item": r["usage_type"], "arquitetura": arq, "unidade": r["unidade"],
@@ -492,8 +492,6 @@ def billing_validation():
     # A atribuição por arquitetura, ao contrário da validação de preços, depende de
     # QUANDO cada braço rodou: o CSV cobre todo o período capturado.
     dias = df[df["data"].isin(CAMPAIGN_DAYS)] if CAMPAIGN_DAYS else df
-    escopo = ("campanha definitiva" if CAMPAIGN_DAYS
-              else "período completo (inclui ensaios e execuções descartadas)")
     gd = dias.groupby("usage_type")["custo_usd"].sum()
     braco = []
     for ut, custo in gd.items():
@@ -518,20 +516,16 @@ def billing_validation():
     bd = bd.sort_values("custo_usd", ascending=False).reset_index(drop=True)
     bd["pct_do_uso"] = (100 * bd["custo_usd"] / bd["custo_usd"].sum()).round(1)
 
-    # O escopo não é o mesmo em todas as linhas, e tratá-las como iguais atribuiria à
-    # campanha um consumo que não foi dela. Só o serverless vem de quantidade medida;
-    # monolito e microsserviços vêm do dia em que foram os únicos a usar seus serviços;
-    # as parcelas fora do modelo são compartilhadas e não se separam por execução.
+    # As linhas não têm o mesmo escopo, e tratá-las como iguais atribuiria à campanha um
+    # consumo que não foi dela: o SGBD e as parcelas fora do modelo ficaram de pé durante
+    # todas as execuções, inclusive a descartada.
     def _escopo(rot):
         if not CAMPAIGN_DAYS:
             return "período completo do CSV"
         if rot == "Serverless":
             return "medido no CloudWatch (só a definitiva)"
-        if rot == "Monolito" or rot == "Microsserviços":
-            # Nos dias em que rodaram, foram os únicos a usar seus próprios serviços.
+        if rot in ("Monolito", "Microsserviços"):
             return "dia do braço (só a definitiva)"
-        # O SGBD ficou de pé durante todas as execuções, e o mesmo vale para as
-        # parcelas fora do modelo: não se separam por execução.
         return "dias da campanha (inclui execuções descartadas)"
 
     bd["escopo"] = bd["rotulo"].map(_escopo)

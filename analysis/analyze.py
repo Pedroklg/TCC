@@ -681,19 +681,16 @@ def lambda_consumption():
 
 
 def normalized_efficiency(alldf, res):
-    """Requisicoes atendidas por vCPU-segundo consumida (§3.4). E o denominador comum
-    entre capacidade contratada e capacidade elastica: no serverless nao ha capacidade
-    total, mas ha consumo faturado.
+    """Requisições atendidas por vCPU-segundo consumida (§3.4), denominador comum
+    entre capacidade contratada e capacidade elástica.
 
-    As quatro linhas usam a janela da campanha inteira, e nao a de um cenario, porque
-    a captura do CloudWatch cobre o braco de ponta a ponta e o consumo nao e separavel
-    por cenario depois do fato. As janelas dos quatro bracos tem a mesma duracao e
-    menos de 2% de tempo ocioso, entao a base e comparavel.
+    A janela é a da campanha inteira, e não a de um cenário: a captura do CloudWatch
+    cobre o braço de ponta a ponta e não se decompõe depois do fato. As quatro têm
+    duração equivalente e menos de 2% de tempo ocioso.
 
-    Ressalva que o numero carrega: nas arquiteturas continuas o vCPU vem da CPU
-    ocupada, enquanto no serverless vem da duracao faturada, que corre tambem
-    enquanto a funcao espera o banco. Sao a mesma unidade de cobranca, nao a mesma
-    medida de trabalho."""
+    Nas arquiteturas contínuas o vCPU vem da CPU ocupada; no serverless, da duração
+    faturada, que corre também enquanto a função espera o banco. É a mesma unidade de
+    cobrança, não a mesma medida de trabalho."""
     rows = []
     span = alldf.groupby("target")["time"].agg(lambda x: (x.max() - x.min()).total_seconds())
     reqs = alldf.groupby("target").size()
@@ -809,13 +806,12 @@ def run_conditions():
 
 
 def first_rep_sensitivity(per_rep):
-    """Compara as metricas com e sem a primeira repeticao de cada celula.
+    """Compara as métricas com e sem a primeira repetição de cada célula.
 
-    A primeira repeticao apos o provisionamento paga JIT, cache e pool de conexoes
-    frios, e no serverless paga tambem os ambientes de execucao ainda nao criados.
-    A tabela existe como verificacao de robustez: o resultado principal usa as dez
-    repeticoes, e descartar a primeira depois de ver os dados seria escolher o
-    recorte pelo efeito que ele produz."""
+    A primeira repetição sucede o provisionamento e paga JIT, cache e pool de conexões
+    frios. Serve como verificação de robustez: o resultado principal usa as dez
+    repetições, e descartar a primeira depois de ver os dados seria escolher o recorte
+    pelo efeito que ele produz."""
     rows = []
     for (t, sc), g in per_rep.groupby(["target", "scenario"]):
         g = g.sort_values("rep")

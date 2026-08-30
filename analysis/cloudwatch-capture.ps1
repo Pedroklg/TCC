@@ -80,8 +80,8 @@ if ($EcsCluster) {
   'max(CpuUtilized) as cpu_units_max, avg(MemoryUtilized) as mem_mb_avg, ' +
   'max(MemoryUtilized) as mem_mb_max by ContainerName'
   # O Container Insights leva alguns minutos para descarregar os dados no grupo de
-  # logs: consultar logo apos a bateria devolve resultado vazio, entao a consulta e
-  # reemitida ate vir preenchida.
+  # logs: consultar logo após a bateria devolve resultado vazio, então a consulta é
+  # reemitida até vir preenchida.
   $res = $null
   foreach ($attempt in 1..5) {
     $qid = aws logs start-query --log-group-name $lg --region $Region `
