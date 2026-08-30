@@ -5,7 +5,8 @@
 #   Lambda   duração como proxy de uso; a memória sai da linha REPORT
 #
 # Conta também, na mesma janela, a fração de invocações a frio por subcenário
-# (f_fria, §3.6) -> results/resources/lambda_cold_fraction.csv.
+# (f_fria, §3.6) -> results/resources/lambda_cold_fraction.csv, e o total faturado
+# por função -> results/resources/lambda-invocacoes-por-funcao.csv.
 #
 # Como rodar: ver analysis/README.md.
 
@@ -120,6 +121,36 @@ foreach ($fn in $LambdaFunctions) {
 
 $rows | Export-Csv -Path $OutCsv -NoTypeInformation -Encoding utf8
 "Uso de recursos salvo em $OutCsv ($($rows.Count) componentes). Depois: python analysis/analyze.py"
+
+# Consumo faturado por função (-> analyze.py::lambda_consumption).
+# A média que o bloco acima usa é uma média de médias por minuto, que dá o mesmo
+# peso a um minuto de pico e a um minuto ocioso. O vCPU-segundo precisa da soma,
+# e a duração média por invocação sai de Sum(Duration)/Sum(Invocations).
+function StatSum($metric, $fn) {
+  $j = aws cloudwatch get-metric-statistics --region $Region --namespace 'AWS/Lambda' --metric-name $metric `
+    --dimensions "Name=FunctionName,Value=$fn" --start-time $Start --end-time $End `
+    --period $PeriodSec --statistics Sum --output json 2>$null | ConvertFrom-Json
+  if (-not $j.Datapoints) { return 0 }
+  return ($j.Datapoints | Measure-Object -Property Sum -Sum).Sum
+}
+if ($LambdaFunctions) {
+  $invRows = foreach ($fn in $LambdaFunctions) {
+    $inv = StatSum 'Invocations' $fn
+    $dur = StatSum 'Duration' $fn
+    $mem = aws lambda get-function-configuration --function-name $fn --region $Region `
+      --query 'MemorySize' --output text 2>$null
+    [pscustomobject]@{
+      funcao           = $fn
+      invocacoes       = $inv
+      duracao_media_ms = $(if ($inv -gt 0) { $dur / $inv } else { $null })
+      duracao_soma_ms  = $dur
+      memoria_mb       = $mem
+    }
+  }
+  $invCsv = Join-Path (Split-Path $OutCsv) 'lambda-invocacoes-por-funcao.csv'
+  $invRows | Export-Csv -Path $invCsv -NoTypeInformation -Encoding utf8
+  "Consumo faturado por funcao salvo em $invCsv"
+}
 
 # --- f_fria (§3.6): fração de invocações a frio OBSERVADA na janela de teste ---
 # Conta as linhas REPORT com Init/Restore Duration vs o total, por subcenário

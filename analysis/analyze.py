@@ -7,6 +7,8 @@ tabela por requisição e produz:
   - tables/summary.csv ......... média ± IC95% por (arquitetura, cenário)
   - tables/stats_tests.txt ..... Shapiro-Wilk + Kruskal-Wallis + Mann-Whitney (unidade: repetição)
   - tables/useful_throughput.csv ..... vazão descontadas as fichas que voltaram vazias
+  - tables/normalized_efficiency.csv . requisições por vCPU-segundo consumida (§3.4)
+  - tables/lambda_consumption.csv .... consumo faturado do Lambda por função
   - figures/*.png .............. gráficos comparativos
 
 Uso:
@@ -650,35 +652,75 @@ def platform_overhead():
     return agg
 
 
-def normalized_efficiency(summary, res, scenario="constant"):
-    """Requisições por vCPU efetivamente consumida. É o denominador comum entre
-    capacidade contratada e capacidade elástica: no serverless não há capacidade total,
-    mas há consumo medido (Billed Duration × memória/1769)."""
+LAMBDA_FN_OP = {"getAllOwners": "listOwners", "getOwnerById": "ownerDetail",
+                "listVets": "listVets", "listPetTypes": "listPetTypes",
+                "createOwner": "createOwner", "createVisit": "createVisit"}
+
+
+def lambda_consumption():
+    """Consumo faturado do Lambda por função (results/resources/lambda-invocacoes-por-funcao.csv).
+
+    O vCPU-segundo do serverless é a duração faturada vezes a fração de vCPU que a
+    memória contratada representa. Diferente das outras arquiteturas, a duração
+    faturada inclui a espera por E/S, então o número mede o que a AWS cobra, não a
+    CPU efetivamente ocupada."""
+    path = os.path.join(RESULTS, "resources", "lambda-invocacoes-por-funcao.csv")
+    df = _read_csv(path)
+    if df is None or "duracao_soma_ms" not in df.columns:
+        return None
+    df = df.copy()
+    df["subcenario"] = np.where(df["funcao"].str.contains("-snap-"), "SnapStart", "Sem otimização")
+    df["operacao"] = df["funcao"].str.rsplit("-", n=1).str[-1].map(LAMBDA_FN_OP)
+    df["vcpu_s"] = df["duracao_soma_ms"] / 1000.0 * (df["memoria_mb"] / LAMBDA_MEM_MB)
+    df["req_por_vcpu_s"] = df["invocacoes"] / df["vcpu_s"]
+    out = df[["subcenario", "operacao", "funcao", "invocacoes", "duracao_media_ms",
+              "vcpu_s", "req_por_vcpu_s"]].sort_values(["subcenario", "operacao"])
+    out.to_csv(os.path.join(TAB, "lambda_consumption.csv"), index=False)
+    return out
+
+
+def normalized_efficiency(alldf, res):
+    """Requisicoes atendidas por vCPU-segundo consumida (§3.4). E o denominador comum
+    entre capacidade contratada e capacidade elastica: no serverless nao ha capacidade
+    total, mas ha consumo faturado.
+
+    As quatro linhas usam a janela da campanha inteira, e nao a de um cenario, porque
+    a captura do CloudWatch cobre o braco de ponta a ponta e o consumo nao e separavel
+    por cenario depois do fato. As janelas dos quatro bracos tem a mesma duracao e
+    menos de 2% de tempo ocioso, entao a base e comparavel.
+
+    Ressalva que o numero carrega: nas arquiteturas continuas o vCPU vem da CPU
+    ocupada, enquanto no serverless vem da duracao faturada, que corre tambem
+    enquanto a funcao espera o banco. Sao a mesma unidade de cobranca, nao a mesma
+    medida de trabalho."""
     rows = []
-    s = summary[summary.scenario == scenario]
+    span = alldf.groupby("target")["time"].agg(lambda x: (x.max() - x.min()).total_seconds())
+    reqs = alldf.groupby("target").size()
     if res is not None:
         for arch, tgt in (("Monolito", "mono"), ("Microsserviços", "micro")):
-            r, t = res[res.architecture == arch], s[s.target == tgt]
-            if r.empty or t.empty:
+            r = res[res.architecture == arch]
+            if r.empty or tgt not in span.index or not span[tgt]:
                 continue
             vcpu = float(r["vcpu_media"].iloc[0])
-            thr = float(t["throughput_rps_mean"].iloc[0])
-            if vcpu and not np.isnan(vcpu):
-                rows.append({"arquitetura": arch, "vcpu_consumida": round(vcpu, 3),
-                             "throughput_rps": round(thr, 1),
-                             "req_por_vcpu_s": round(thr / vcpu, 1)})
-    cs = os.path.join(TAB, "coldstart_summary.csv")
-    if os.path.exists(cs):
-        try:
-            for _, r in pd.read_csv(cs).iterrows():
-                b = r.get("billed_warm_med_ms", np.nan)
-                if pd.notna(b) and b > 0:
-                    vcpu_s = (b / 1000.0) * (LAMBDA_MEM_MB / 1769.0)
-                    rows.append({"arquitetura": f"Serverless ({r['subscenario']})",
-                                 "vcpu_consumida": np.nan, "throughput_rps": np.nan,
-                                 "req_por_vcpu_s": round(1.0 / vcpu_s, 1)})
-        except (OSError, ValueError, KeyError):
-            pass
+            if not vcpu or np.isnan(vcpu):
+                continue
+            thr = reqs[tgt] / span[tgt]
+            rows.append({"arquitetura": arch, "requisicoes": int(reqs[tgt]),
+                         "janela_s": round(float(span[tgt]), 1),
+                         "throughput_rps": round(thr, 1), "vcpu_media": round(vcpu, 3),
+                         "req_por_vcpu_s": round(thr / vcpu, 1)})
+    lam = lambda_consumption()
+    if lam is not None:
+        for sub, g in lam.groupby("subcenario", sort=False):
+            tgt = "serverless-snap" if "snap" in sub.lower() else "serverless-cold"
+            if tgt not in span.index or not span[tgt]:
+                continue
+            vcpu_s, inv = g["vcpu_s"].sum(), g["invocacoes"].sum()
+            rows.append({"arquitetura": f"Serverless ({sub})", "requisicoes": int(inv),
+                         "janela_s": round(float(span[tgt]), 1),
+                         "throughput_rps": round(inv / span[tgt], 1),
+                         "vcpu_media": round(vcpu_s / span[tgt], 3),
+                         "req_por_vcpu_s": round(inv / vcpu_s, 1)})
     if not rows:
         return None
     eff = pd.DataFrame(rows)
@@ -785,7 +827,7 @@ def main():
     tests = stat_tests(per_rep, od_per_rep)
     warm = warmup_sensitivity(alldf)
     over = platform_overhead()
-    neff = normalized_efficiency(summary, res)
+    neff = normalized_efficiency(alldf, res)
     util = useful_throughput(alldf, aggdf)
 
     cond = run_conditions()
