@@ -9,6 +9,7 @@ tabela por requisição e produz:
   - tables/useful_throughput.csv ..... vazão descontadas as fichas que voltaram vazias
   - tables/normalized_efficiency.csv . requisições por vCPU-segundo consumida (§3.4)
   - tables/lambda_consumption.csv .... consumo faturado do Lambda por função
+  - tables/first_rep_sensitivity.csv . robustez: efeito da primeira repetição
   - figures/*.png .............. gráficos comparativos
 
 Uso:
@@ -807,6 +808,36 @@ def run_conditions():
     return agg
 
 
+def first_rep_sensitivity(per_rep):
+    """Compara as metricas com e sem a primeira repeticao de cada celula.
+
+    A primeira repeticao apos o provisionamento paga JIT, cache e pool de conexoes
+    frios, e no serverless paga tambem os ambientes de execucao ainda nao criados.
+    A tabela existe como verificacao de robustez: o resultado principal usa as dez
+    repeticoes, e descartar a primeira depois de ver os dados seria escolher o
+    recorte pelo efeito que ele produz."""
+    rows = []
+    for (t, sc), g in per_rep.groupby(["target", "scenario"]):
+        g = g.sort_values("rep")
+        sem = g[g.rep > g.rep.min()]
+        if len(sem) < 2:
+            continue
+        row = {"target": t, "scenario": sc, "reps": len(g)}
+        for m in ("throughput_rps", "p95_ms"):
+            a, b = g[m].to_numpy(dtype=float), sem[m].to_numpy(dtype=float)
+            row[f"{m}_com_rep1"] = a.mean()
+            row[f"{m}_sem_rep1"] = b.mean()
+            row[f"{m}_delta_pct"] = 100 * (b.mean() - a.mean()) / a.mean() if a.mean() else np.nan
+            row[f"{m}_cv_com_pct"] = 100 * a.std(ddof=1) / a.mean() if a.mean() else np.nan
+            row[f"{m}_cv_sem_pct"] = 100 * b.std(ddof=1) / b.mean() if b.mean() else np.nan
+        rows.append(row)
+    if not rows:
+        return None
+    frs = pd.DataFrame(rows)
+    frs.to_csv(os.path.join(TAB, "first_rep_sensitivity.csv"), index=False)
+    return frs
+
+
 def main():
     alldf, aggdf = load_all()
     per_rep = per_rep_metrics(alldf)
@@ -829,6 +860,7 @@ def main():
     over = platform_overhead()
     neff = normalized_efficiency(alldf, res)
     util = useful_throughput(alldf, aggdf)
+    frs = first_rep_sensitivity(per_rep)
 
     cond = run_conditions()
 
@@ -864,6 +896,9 @@ def main():
     if util is not None:
         print("\n=== Vazão útil (descontadas as fichas que voltaram vazias) ===")
         print(util.round(2).to_string(index=False))
+    if frs is not None:
+        print("\n=== Robustez: efeito da primeira repetição ===")
+        print(frs.round(2).to_string(index=False))
     print("\n=== Testes estatísticos ===\n" + tests)
     print(f"Figuras em {FIG}/ | Tabelas em {TAB}/")
 
