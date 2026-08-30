@@ -420,6 +420,83 @@ def table_efficiency(subs, frac):
     return eff
 
 
+# Tipos de uso do Cost Explorer que correspondem a um preco da Tabela 3, e o braco a
+# que pertencem. O SGBD entra a parte por ser piso comum as tres (secao 3.6).
+BILLING_MAP = {
+    "BoxUsage:c5.large":              ("Monolito", "ec2_c5_large_hr", 1),
+    "USE1-Fargate-vCPU-Hours:perCPU": ("Microsserviços", "fargate_vcpu_hr", 1),
+    "USE1-Fargate-GB-Hours":          ("Microsserviços", "fargate_gb_hr", 1),
+    "LoadBalancerUsage":              ("Microsserviços", "alb_hr", 1),
+    "LCUUsage":                       ("Microsserviços", "alb_lcu_hr", 1),
+    "Lambda-GB-Second":               ("Serverless", "lambda_gb_s", 1),
+    "Request":                        ("Serverless", "lambda_req", 1),
+    "USE1-ApiGatewayHttpRequest":     ("Serverless", "apigw_req", 1),
+    "BoxUsage:m5.large":              ("SGBD (comum)", "ec2_m5_large_hr", 1),
+}
+# Fora do modelo por decisao declarada na secao 3.6, com o motivo de cada exclusao.
+BILLING_FORA = {
+    "DataTransfer-Out-Bytes": "transferência de dados",
+    "DataTransfer-Regional-Bytes": "transferência de dados",
+    "BoxUsage:c5.xlarge": "gerador de carga (aparato)",
+    "USE1-VendedLog-Bytes": "observabilidade",
+    "EBS:VolumeUsage.gp3": "armazenamento",
+    "Requests-Tier1": "armazenamento",
+    "Requests-Tier2": "armazenamento",
+    "USE1-PublicIPv4:InUseAddress": "endereçamento IPv4 público",
+    "USE1-PublicIPv4:IdleAddress": "endereçamento IPv4 público",
+    "USE1-APIRequest": "consultas ao próprio Cost Explorer",
+}
+
+
+def billing_validation():
+    """Confronta o modelo com a fatura (§3.6), a partir de billing-capture.ps1.
+
+    Divide o custo faturado pela quantidade faturada para obter o preço unitário
+    efetivamente cobrado, que é o que se compara à Tabela 3. Um preço abaixo do
+    tabelado indica franquia gratuita no período, e não erro do modelo."""
+    path = os.path.join(RES, "resources", "billing-usage-type.csv")
+    if not os.path.exists(path):
+        print("[fatura] billing-usage-type.csv ainda não existe — pulado "
+              "(rode analysis/billing-capture.ps1).")
+        return None, None
+    try:
+        df = pd.read_csv(path)
+    except (OSError, ValueError):
+        return None, None
+    if "usage_type" not in df.columns:
+        return None, None
+    g = df.groupby("usage_type").agg(custo_usd=("custo_usd", "sum"),
+                                     quantidade=("quantidade", "sum"),
+                                     unidade=("unidade", "first")).reset_index()
+
+    val = []
+    for _, r in g.iterrows():
+        m = BILLING_MAP.get(r["usage_type"])
+        if not m or not r["quantidade"]:
+            continue
+        arq, chave, _ = m
+        p_mod, p_fat = P[chave], r["custo_usd"] / r["quantidade"]
+        dev = 100 * (p_fat - p_mod) / p_mod if p_mod else np.nan
+        val.append({"item": r["usage_type"], "arquitetura": arq, "unidade": r["unidade"],
+                    "preco_modelo_usd": p_mod, "preco_faturado_usd": round(p_fat, 12),
+                    "desvio_pct": round(dev, 3), "quantidade": r["quantidade"],
+                    "custo_usd": round(r["custo_usd"], 4),
+                    "obs": "franquia gratuita no período" if dev < -1 else ""})
+    val = pd.DataFrame(val).sort_values("custo_usd", ascending=False)
+    val.to_csv(os.path.join(TAB, "billing_validation.csv"), index=False)
+
+    braco = []
+    for _, r in g.iterrows():
+        m = BILLING_MAP.get(r["usage_type"])
+        rot = m[0] if m else f"fora do modelo: {BILLING_FORA.get(r['usage_type'], 'outros')}"
+        braco.append({"rotulo": rot, "custo_usd": r["custo_usd"]})
+    bd = (pd.DataFrame(braco).groupby("rotulo")["custo_usd"].sum()
+          .round(4).sort_values(ascending=False).reset_index())
+    bd["pct_do_uso"] = (100 * bd["custo_usd"] / bd["custo_usd"].sum()).round(1)
+    bd.to_csv(os.path.join(TAB, "billing_by_arm.csv"), index=False)
+    return val, bd
+
+
 def main():
     measured = load_coldstart_measured()
     frac = apply_measured_overrides(measured)
@@ -479,6 +556,13 @@ def main():
           "(caso conservador). Os fatores de desconto foram conferidos na Price List API e "
           "nos Savings Plans (28 ago. 2026), sempre na forma sem adiantamento. A duração "
           "cobrada e a fração fria vêm da campanha, não dos defaults do script.")
+    bval, barm = billing_validation()
+    if bval is not None:
+        print("\n=== Validação do modelo contra a fatura (§3.6) ===")
+        print(bval[["item", "arquitetura", "preco_modelo_usd", "preco_faturado_usd",
+                    "desvio_pct", "custo_usd", "obs"]].to_string(index=False))
+        print("\n=== Custo faturado por arquitetura no período experimental ===")
+        print(barm.to_string(index=False))
     print(f"Figuras em {FIG}/ | Tabelas em {TAB}/")
 
 

@@ -95,6 +95,11 @@ mão (requer `aws configure` feito):
 .\analysis\coldstart-capture.ps1 -Subscenario snapstart -Qualifier live `
     -Functions @('tcc-petclinic-snap-getAllOwners','tcc-petclinic-snap-getOwnerById') `
     -Reps 15 -WarmPerCold 5
+
+# Custo faturado no período -> results/resources/billing-usage-type.csv
+# Roda DEPOIS do experimento: o Cost Explorer leva cerca de 24 h para consolidar,
+# e a tag de alocação de custo precisa estar ativa ANTES do gasto (não é retroativa).
+.\analysis\billing-capture.ps1 -Start 2026-08-27 -End 2026-08-31
 ```
 
 O `coldstart-capture.ps1` precisa de permissão para `lambda:*` e
