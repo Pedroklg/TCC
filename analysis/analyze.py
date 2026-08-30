@@ -6,6 +6,7 @@ tabela por requisição e produz:
   - tables/per_rep.csv ......... métricas por repetição (base do tratamento estatístico)
   - tables/summary.csv ......... média ± IC95% por (arquitetura, cenário)
   - tables/stats_tests.txt ..... Shapiro-Wilk + Kruskal-Wallis + Mann-Whitney (unidade: repetição)
+  - tables/useful_throughput.csv ..... vazão descontadas as fichas que voltaram vazias
   - figures/*.png .............. gráficos comparativos
 
 Uso:
@@ -72,30 +73,44 @@ PLATFORM_SERVICES = {"config-server", "discovery-server", "api-gateway"}
 
 
 def parse_raw(path):
-    """Extrai os Points de http_req_duration (1 por requisição)."""
+    """Extrai os Points de http_req_duration (1 por requisição) e os de
+    agg_visits_present (1 por ficha agregada; valor 1 quando a ficha veio com visitas).
+
+    Os dois vêm da mesma passada porque o bruto de uma repetição chega a 130 MB e
+    reler o arquivo por métrica dobraria o tempo de análise da campanha."""
     t, dur, st, op = [], [], [], []
+    at, av = [], []
     with open(path, encoding="utf-8") as f:
         for line in f:
-            if '"http_req_duration"' not in line:
+            is_http = '"http_req_duration"' in line
+            if not is_http and '"agg_visits_present"' not in line:
                 continue
             try:
                 o = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if o.get("type") != "Point" or o.get("metric") != "http_req_duration":
+            if o.get("type") != "Point":
                 continue
             d = o["data"]
+            if o.get("metric") == "agg_visits_present":
+                at.append(d["time"]); av.append(d["value"])
+                continue
+            if o.get("metric") != "http_req_duration":
+                continue
             tags = d.get("tags", {})
             t.append(d["time"]); dur.append(d["value"])
             st.append(tags.get("status", "")); op.append(tags.get("op", ""))
     df = pd.DataFrame({"time": t, "duration_ms": dur, "status": st, "op": op})
     if not df.empty:
         df["time"] = pd.to_datetime(df["time"], format="ISO8601", utc=True)
-    return df
+    agg = pd.DataFrame({"time": at, "present": av})
+    if not agg.empty:
+        agg["time"] = pd.to_datetime(agg["time"], format="ISO8601", utc=True)
+    return df, agg
 
 
 def load_all():
-    frames = []
+    frames, aframes = [], []
     pattern = os.path.join(RESULTS, "*", "*", "*-raw.json")
     for raw in glob.glob(pattern):
         fname = os.path.basename(raw)
@@ -105,11 +120,14 @@ def load_all():
         run = os.path.basename(os.path.dirname(raw))
         target = os.path.basename(os.path.dirname(os.path.dirname(raw)))
         scenario, rep = m.group(1), int(m.group(2) or 1)
-        df = parse_raw(raw)
+        df, agg = parse_raw(raw)
         if df.empty:
             continue
         df["target"], df["run"], df["scenario"], df["rep"] = target, run, scenario, rep
         frames.append(df)
+        if not agg.empty:
+            agg["target"], agg["run"], agg["scenario"], agg["rep"] = target, run, scenario, rep
+            aframes.append(agg)
     if not frames:
         sys.exit(f"Nenhum *-raw.json encontrado em {RESULTS}/<alvo>/<ts>/")
     alldf = pd.concat(frames, ignore_index=True)
@@ -118,7 +136,9 @@ def load_all():
             print(f"[aviso] '{t}' tem {n} execuções em {RESULTS}/ — cada (execução, repetição) "
                   f"conta como uma repetição distinta.", file=sys.stderr)
     alldf["failed"] = ~alldf["status"].astype(str).str.match(r"[23]..").fillna(False)
-    return alldf
+    aggdf = (pd.concat(aframes, ignore_index=True) if aframes
+             else pd.DataFrame(columns=["time", "present", "target", "run", "scenario", "rep"]))
+    return alldf, aggdf
 
 
 def order_targets(ts):
@@ -408,7 +428,78 @@ def by_operation(alldf, scenario="constant"):
     return sm
 
 
-def scalability(alldf):
+def _useful_per_sec(d, aggdf, target, scenario, thr, reps):
+    """Série por segundo da vazão útil: a vazão total menos as fichas agregadas que
+    voltaram vazias. Devolve None quando não há dado de agregação para o alvo."""
+    if aggdf is None or aggdf.empty:
+        return None
+    a = aggdf[(aggdf.target == target) & (aggdf.scenario == scenario)]
+    if a.empty:
+        return None
+    # O relógio da série é o da primeira requisição da repetição, não o da primeira
+    # ficha: a ficha só ocorre depois da listagem, e origens distintas deslocariam
+    # as duas séries entre si.
+    t0 = d.groupby(["run", "rep"])["time"].min()
+    a = a.join(t0.rename("t0"), on=["run", "rep"])
+    a = a[a["t0"].notna()]
+    if a.empty:
+        return None
+    a = a.assign(sec=((a["time"] - a["t0"]).dt.total_seconds()).astype(int))
+    det = d[d.op == "ownerDetail"].groupby("sec").size().reindex(thr.index).fillna(0) / reps
+    okagg = a.groupby("sec")["present"].sum().reindex(thr.index).fillna(0) / reps
+    return (thr - det + okagg).clip(lower=0)
+
+
+def useful_throughput(alldf, aggdf):
+    """Vazão útil por repetição: desconta da vazão total as fichas que voltaram sem
+    visitas. Sob estresse o disjuntor do gateway responde 200 com a lista de visitas
+    vazia, e contar essas respostas como trabalho entregue creditaria à arquitetura
+    uma capacidade que ela não sustentou. É o mesmo critério que a calibração já
+    aplica às requisições com erro."""
+    if aggdf is None or aggdf.empty:
+        return None
+    keys = ["target", "scenario", "run", "rep"]
+    fichas = {k: v for k, v in aggdf.groupby(keys)}
+    rows = []
+    for (t, sc, run, rep), g in alldf.groupby(keys):
+        a = fichas.get((t, sc, run, rep))
+        if a is None:
+            continue
+        # Mesmo recorte de per_rep_metrics, para a vazão total desta tabela bater com
+        # a de summary.csv. As fichas seguem o mesmo corte: aparar só as requisições
+        # subtrairia fichas de um intervalo que já não está no numerador.
+        if sc == "constant" and WARMUP_SEC > 0 and t in WARMUP_TARGETS:
+            cut = g["time"].min() + pd.Timedelta(seconds=WARMUP_SEC)
+            g, a = g[g["time"] >= cut], a[a["time"] >= cut]
+            if g.empty:
+                continue
+        span = (g["time"].max() - g["time"].min()).total_seconds()
+        if span <= 0:
+            continue
+        n_ok, n_det = a["present"].sum(), len(a)
+        total = len(g)
+        rows.append({"target": t, "scenario": sc, "run": run, "rep": rep,
+                     "vazao_total_rps": total / span,
+                     "vazao_util_rps": (total - n_det + n_ok) / span,
+                     "fichas": n_det, "fichas_completas": n_ok,
+                     "share_ficha": n_det / total if total else np.nan})
+    if not rows:
+        return None
+    per = pd.DataFrame(rows)
+    agg = per.groupby(["target", "scenario"]).agg(
+        reps=("rep", "size"),
+        vazao_total_rps=("vazao_total_rps", "mean"),
+        vazao_util_rps=("vazao_util_rps", "mean"),
+        share_ficha=("share_ficha", "mean"),
+    ).reset_index()
+    agg["fichas_completas_pct"] = 100 * (per.groupby(["target", "scenario"])["fichas_completas"].sum()
+                                         / per.groupby(["target", "scenario"])["fichas"].sum()).values
+    agg["perda_pct"] = 100 * (1 - agg["vazao_util_rps"] / agg["vazao_total_rps"])
+    agg.to_csv(os.path.join(TAB, "useful_throughput.csv"), index=False)
+    return agg
+
+
+def scalability(alldf, aggdf=None):
     """Curva de escalabilidade (throughput sob carga crescente) para rampa e pico.
     O ponto de saturação sai APENAS do pico (§3.7): a rampa é de modelo fechado e o
     throughput ali é limitado pela carga ofertada, não pela capacidade. É o maior
@@ -437,12 +528,19 @@ def scalability(alldf):
             thr_w = thr.rolling(win, center=True, min_periods=mp).median()
             err_w = err.rolling(win, center=True, min_periods=mp).max()
             ok = thr_w[err_w < thr_err]
-            rows.append({
+            row = {
                 "target": t, "scenario": s,
                 "throughput_max_sustentavel_rps": round(float(ok.max()), 1) if len(ok) else float("nan"),
                 "throughput_pico_rps": round(float(thr.max()), 1),
                 "erro_max_pct": round(100 * float(err.max()), 2),
-            })
+                "vazao_util_max_rps": float("nan"),
+            }
+            util = _useful_per_sec(d, aggdf, t, s, thr, reps)
+            if util is not None:
+                util_ok = util.rolling(win, center=True, min_periods=mp).median()[err_w < thr_err]
+                if len(util_ok):
+                    row["vazao_util_max_rps"] = round(float(util_ok.max()), 1)
+            rows.append(row)
         ax.set_xlabel("Tempo do teste (s) — carga ofertada crescente")
         ax.set_ylabel("Throughput alcançado (req/s)")
         ax.set_title(f"Escalabilidade — throughput sob carga ({SCNLAB[s]})")
@@ -668,7 +766,7 @@ def run_conditions():
 
 
 def main():
-    alldf = load_all()
+    alldf, aggdf = load_all()
     per_rep = per_rep_metrics(alldf)
     summary = summarize(per_rep)
 
@@ -681,13 +779,14 @@ def main():
     grouped_bar(summary, "p99_ms", "p99 (ms)", "Tempo de resposta (p99) por arquitetura", "bar_p99.png")
     boxplots(alldf); ecdf(alldf); timeseries(alldf)
     byop = by_operation(alldf)
-    sat = scalability(alldf)
+    sat = scalability(alldf, aggdf)
     res = resource_usage()
     od_per_rep, od = owner_detail_comparison(alldf)
     tests = stat_tests(per_rep, od_per_rep)
     warm = warmup_sensitivity(alldf)
     over = platform_overhead()
     neff = normalized_efficiency(summary, res)
+    util = useful_throughput(alldf, aggdf)
 
     cond = run_conditions()
 
@@ -720,6 +819,9 @@ def main():
     if neff is not None:
         print("\n=== Eficiência normalizada (req por vCPU-segundo consumida) ===")
         print(neff.round(2).to_string(index=False))
+    if util is not None:
+        print("\n=== Vazão útil (descontadas as fichas que voltaram vazias) ===")
+        print(util.round(2).to_string(index=False))
     print("\n=== Testes estatísticos ===\n" + tests)
     print(f"Figuras em {FIG}/ | Tabelas em {TAB}/")
 
