@@ -302,9 +302,12 @@ def fig_decision_map():
     ax.set_xlabel("Taxa média no período ativo (req/s)")
     ax.set_ylabel("Fração ativa do mês")
     ax.set_title("Arquitetura mais barata por perfil de tráfego")
-    handles = [plt.Rectangle((0, 0), 1, 1, color=c)
-               for c in ["#aec7e8", "#ffbb78", "#98df8a"]]
-    ax.legend(handles, archs, loc="upper left", fontsize=8)
+    # Só as arquiteturas que vencem em alguma região: uma entrada de legenda sem
+    # área correspondente faria procurar no mapa uma cor que não está lá.
+    cores = ["#aec7e8", "#ffbb78", "#98df8a"]
+    presentes = sorted(set(grid.flatten().tolist()))
+    handles = [plt.Rectangle((0, 0), 1, 1, color=cores[i]) for i in presentes]
+    ax.legend(handles, [archs[i] for i in presentes], loc="upper left", fontsize=8)
     fig.tight_layout()
     fig.savefig(os.path.join(FIG, "cost_decision_map.png"), dpi=150)
     plt.close(fig)
@@ -492,6 +495,21 @@ def billing_validation():
     # A atribuição por arquitetura, ao contrário da validação de preços, depende de
     # QUANDO cada braço rodou: o CSV cobre todo o período capturado.
     dias = df[df["data"].isin(CAMPAIGN_DAYS)] if CAMPAIGN_DAYS else df
+
+    # Decomposição por tipo de uso, para que as exclusões declaradas na seção 3.6
+    # permaneçam auditáveis: o que o modelo não cobre precisa ser visível item a item.
+    brk = dias.groupby(["usage_type", "unidade"], as_index=False).agg(
+        custo_usd=("custo_usd", "sum"), quantidade=("quantidade", "sum"))
+    brk["no_modelo"] = np.where(brk["usage_type"].isin(BILLING_MAP), "sim", "nao")
+    brk = brk.sort_values("custo_usd", ascending=False).reset_index(drop=True)
+    brk["custo_usd"] = brk["custo_usd"].round(4)
+    brk["quantidade"] = brk["quantidade"].round(2)
+    brk.to_csv(os.path.join(TAB, "billing_breakdown.csv"), index=False)
+    tot_fat = float(brk["custo_usd"].sum())
+    tot_mod = float(brk.loc[brk["no_modelo"] == "sim", "custo_usd"].sum())
+    print(f"\nCobertura do modelo: USD {tot_mod:.2f} modelados de {tot_fat:.2f} faturados "
+          f"({100 * tot_mod / tot_fat:.1f}%); fora do modelo USD {tot_fat - tot_mod:.2f}")
+
     gd = dias.groupby("usage_type")["custo_usd"].sum()
     braco = []
     for ut, custo in gd.items():
@@ -514,7 +532,9 @@ def billing_validation():
             ignore_index=True)
     bd["custo_usd"] = bd["custo_usd"].round(4)
     bd = bd.sort_values("custo_usd", ascending=False).reset_index(drop=True)
-    bd["pct_do_uso"] = (100 * bd["custo_usd"] / bd["custo_usd"].sum()).round(1)
+    # Percentual do total atribuído nesta tabela, e não do faturado no período: as duas
+    # bases diferem porque o braço serverless entra pela quantidade medida.
+    bd["pct_do_total"] = (100 * bd["custo_usd"] / bd["custo_usd"].sum()).round(1)
 
     # As linhas não têm o mesmo escopo, e tratá-las como iguais atribuiria à campanha um
     # consumo que não foi dela: o SGBD e as parcelas fora do modelo ficaram de pé durante
