@@ -451,8 +451,12 @@ BILLING_FORA = {
     "Requests-Tier2": "armazenamento",
     "USE1-PublicIPv4:InUseAddress": "endereçamento IPv4 público",
     "USE1-PublicIPv4:IdleAddress": "endereçamento IPv4 público",
-    "USE1-APIRequest": "consultas ao próprio Cost Explorer",
 }
+
+# Consultar o Cost Explorer é o custo de auditar o experimento, não de executá-lo, e
+# não pertence a arquitetura alguma. Fica fora da atribuição, mas segue no
+# billing_breakdown.csv, que decompõe a fatura inteira.
+BILLING_META = {"USE1-APIRequest"}
 
 
 def billing_validation():
@@ -513,6 +517,8 @@ def billing_validation():
     gd = dias.groupby("usage_type")["custo_usd"].sum()
     braco = []
     for ut, custo in gd.items():
+        if ut in BILLING_META:
+            continue
         m = BILLING_MAP.get(ut)
         rot = m[0] if m else f"fora do modelo: {BILLING_FORA.get(ut, 'outros')}"
         braco.append({"rotulo": rot, "custo_usd": custo})
