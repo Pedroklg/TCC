@@ -80,15 +80,17 @@ def main():
     summary.to_csv(os.path.join(TAB, "coldstart_summary.csv"), index=False)
 
     # --- Gráfico 1: Init Duration (cold) por subcenário ---
-    means = [df[(df.subscenario == s) & (df.invocation == "cold")]["init_ms"].mean() for s in subs]
+    # Mediana, e não média: é a estatística que a tabela-resumo reporta, e a
+    # distribuição é assimétrica à direita.
+    meds = [df[(df.subscenario == s) & (df.invocation == "cold")]["init_ms"].median() for s in subs]
     cis = [ci95(df[(df.subscenario == s) & (df.invocation == "cold")]["init_ms"]) for s in subs]
     fig, ax = plt.subplots(figsize=(7, 5))
-    bars = ax.bar([SUBLAB[s] for s in subs], means, yerr=cis, capsize=5,
+    bars = ax.bar([SUBLAB[s] for s in subs], meds, yerr=cis, capsize=5,
                   color=["#d62728", "#2ca02c"][:len(subs)])
-    ax.set_ylabel("Init Duration — cold start (ms)")
+    ax.set_ylabel("Duração de inicialização a frio (ms)")
     ax.set_title("Inicialização a frio: sem otimização × SnapStart")
     ax.grid(axis="y", alpha=0.3)
-    for b, m in zip(bars, means):
+    for b, m in zip(bars, meds):
         ax.text(b.get_x() + b.get_width() / 2, m, f"{m:.0f} ms", ha="center", va="bottom")
     fig.tight_layout(); fig.savefig(os.path.join(FIG, "coldstart_init.png"), dpi=150); plt.close(fig)
 

@@ -247,6 +247,12 @@ def boxplots(alldf):
 
 
 def ecdf(alldf):
+    """ECDF do tempo de resposta por cenário.
+
+    Eixo logarítmico: as arquiteturas diferem em ordens de grandeza e as invocações a
+    frio estendem a cauda a dezenas de segundos, o que em escala linear comprimiria o
+    corpo da distribuição contra o eixo. Aplica o mesmo descarte de aquecimento de
+    per_rep_metrics, para que os percentis lidos no gráfico sejam os da tabela-resumo."""
     for s in SCN:
         sub = alldf[alldf.scenario == s]
         targets = order_targets(sub.target.unique())
@@ -254,17 +260,27 @@ def ecdf(alldf):
             continue
         fig, ax = plt.subplots(figsize=(7, 5))
         for t in targets:
-            d = np.sort(sub[sub.target == t]["duration_ms"].to_numpy())
+            g = sub[sub.target == t]
+            if s == "constant" and WARMUP_SEC > 0 and t in WARMUP_TARGETS:
+                cut = g.groupby(["run", "rep"])["time"].transform("min") + pd.Timedelta(seconds=WARMUP_SEC)
+                g = g[g["time"] >= cut]
+            d = np.sort(g["duration_ms"].to_numpy())
             y = np.arange(1, len(d) + 1) / len(d)
             ax.plot(d, y, label=LABEL[t], color=COLOR.get(t))
-        ax.set_xlabel("Tempo de resposta (ms)"); ax.set_ylabel("Proporção acumulada")
+        ax.set_xscale("log")
+        ax.set_xlim(left=1)
+        ax.set_xlabel("Tempo de resposta (ms, escala logarítmica)"); ax.set_ylabel("Proporção acumulada")
         ax.set_title(f"ECDF do tempo de resposta — {SCNLAB[s]}")
         ax.legend(title="Arquitetura"); ax.grid(alpha=0.3)
         fig.tight_layout(); fig.savefig(os.path.join(FIG, f"ecdf_{s}.png"), dpi=150); plt.close(fig)
 
 
 def timeseries(alldf):
-    """p95 por segundo ao longo do tempo — revela degradação (rampa) e saturação (pico)."""
+    """p95 por segundo ao longo do tempo — revela degradação (rampa) e saturação (pico).
+
+    Segundos com poucas requisições são descartados: depois do fim da fase de chegada
+    restam apenas as requisições que ainda drenavam, e um p95 estimado sobre um punhado
+    delas produz picos isolados que sugerem um evento inexistente."""
     for s in ["ramp", "spike"]:
         sub = alldf[alldf.scenario == s]
         targets = order_targets(sub.target.unique())
@@ -274,7 +290,8 @@ def timeseries(alldf):
         for t in targets:
             d = sub[sub.target == t].copy()
             d["sec"] = d.groupby(["run", "rep"])["time"].transform(lambda x: (x - x.min()).dt.total_seconds()).astype(int)
-            g = d.groupby("sec")["duration_ms"].quantile(0.95)
+            n = d.groupby("sec").size()
+            g = d.groupby("sec")["duration_ms"].quantile(0.95)[n >= max(30, 0.05 * n.median())]
             ax.plot(g.index, g.values, label=LABEL[t], linewidth=1.5, color=COLOR.get(t))
         ax.set_xlabel("Tempo do teste (s)"); ax.set_ylabel("p95 do tempo de resposta (ms)")
         ax.set_title(f"Evolução temporal do p95 — {SCNLAB[s]}")
@@ -601,18 +618,24 @@ def resource_usage():
 
     sub = agg[agg.architecture.isin(["Monolito", "Microsserviços"])]
     if not sub.empty and sub["vcpu_media"].notna().any():
+        # Um painel por recurso: vCPU e GB são unidades distintas e no mesmo eixo
+        # convidariam a uma comparação sem sentido. O pico acompanha a média porque é
+        # ele que mostra o teto contratado sendo atingido.
         x = np.arange(len(sub)); w = 0.38
-        fig, ax = plt.subplots(figsize=(7, 5))
-        ax.bar(x - w / 2, sub["vcpu_media"], w, label="vCPU média utilizada")
-        ax.bar(x + w / 2, sub["gb_media"], w, label="GB médios utilizados")
-        for i, (_, r) in enumerate(sub.iterrows()):
-            ax.text(i, np.nanmax([r["vcpu_media"], r["gb_media"]]),
-                    f"alocado: {r['vcpu_alocada']:.1f} vCPU / {r['gb_alocada']:.1f} GB",
-                    ha="center", va="bottom", fontsize=8)
-        ax.set_xticks(x); ax.set_xticklabels(sub["architecture"])
-        ax.set_ylabel("Uso absoluto (vCPU e GB)")
-        ax.set_title("Uso de recursos por arquitetura (verificação da equivalência)")
-        ax.legend(); ax.grid(axis="y", alpha=0.3)
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+        for ax, (med, pico, aloc, un) in zip(axes, [
+                ("vcpu_media", "vcpu_pico", "vcpu_alocada", "vCPU"),
+                ("gb_media", "gb_pico", "gb_alocada", "GB")]):
+            ax.bar(x - w / 2, sub[med], w, label="média utilizada", color="tab:blue")
+            ax.bar(x + w / 2, sub[pico], w, label="pico utilizado", color="tab:orange")
+            teto = sub[aloc].max()
+            ax.axhline(teto, color="tab:red", linestyle="--", linewidth=1.2,
+                       label=f"contratado ({teto:.0f} {un})")
+            ax.set_xticks(x); ax.set_xticklabels(sub["architecture"])
+            ax.set_ylabel(f"{un} (absoluto)")
+            ax.set_ylim(0, teto * 1.35)  # folga para a legenda não cobrir a linha do teto
+            ax.legend(fontsize=8); ax.grid(axis="y", alpha=0.3)
+        fig.suptitle("Uso de recursos por arquitetura (verificação da equivalência)")
         fig.tight_layout(); fig.savefig(os.path.join(FIG, "resource_usage.png"), dpi=150); plt.close(fig)
     return agg
 
