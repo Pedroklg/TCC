@@ -99,8 +99,12 @@ def main():
     cold_med = [df[(df.subscenario == s) & (df.invocation == "cold")]["duration_ms"].median() for s in subs]
     warm_med = [df[(df.subscenario == s) & (df.invocation == "warm")]["duration_ms"].median() for s in subs]
     fig, ax = plt.subplots(figsize=(7, 5))
-    ax.bar(x - w / 2, cold_med, w, label="Cold start", color="#d62728")
-    ax.bar(x + w / 2, warm_med, w, label="Warm start", color="#1f77b4")
+    b_cold = ax.bar(x - w / 2, cold_med, w, label="Cold start", color="#d62728")
+    b_warm = ax.bar(x + w / 2, warm_med, w, label="Warm start", color="#1f77b4")
+    # em escala log a barra não tem base: sem o rótulo, a de warm lê-se como zero
+    for bars, vals in ((b_cold, cold_med), (b_warm, warm_med)):
+        for b, m in zip(bars, vals):
+            ax.text(b.get_x() + b.get_width() / 2, m, f"{m:.0f} ms", ha="center", va="bottom")
     ax.set_xticks(x); ax.set_xticklabels([SUBLAB[s] for s in subs])
     ax.set_ylabel("Tempo de resposta (ms, escala log)")
     ax.set_yscale("log")  # cold e warm diferem em ordens de grandeza

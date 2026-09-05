@@ -65,6 +65,9 @@ PRICING_MODES = {
     "ri-3y":     {"ec2": 0.424, "fargate": 0.55},
 }
 
+# Rótulo em português para as legendas: as chaves internas não aparecem na monografia.
+MODELAB = {"on-demand": "sob demanda", "ri-1y": "reservada 1 ano", "ri-3y": "reservada 3 anos"}
+
 # --- Dimensionamento (Quadro 2) ---
 FARGATE_VCPU, FARGATE_GB = 2.0, 4.0       # soma das 6 tarefas
 LAMBDA_MEM_GB = 1769 / 1024               # ≈ 1 vCPU/invocação
@@ -235,14 +238,14 @@ def fig_breakeven_band(reqs, subs, frac):
                        for r in reqs])
         ax.fill_between(reqs, lo, hi, alpha=0.20, color=SUBCOLOR[k])
         ax.plot(reqs, lo, color=SUBCOLOR[k], linewidth=1.4,
-                label=f"Serverless — {SUBLAB[k]} (p50–p95)")
+                label=f"Serverless — {SUBLAB[k]} (mediana–p95)")
         curves[k] = (lo, hi)
 
     for arch, color in [("Monolito", "tab:blue"), ("Microsserviços", "tab:orange")]:
         for mode, ls in [("on-demand", "-"), ("ri-3y", "--")]:
             c = np.array([cost(r, mode=mode)[arch] for r in reqs])
             ax.plot(reqs, c, ls, color=color, linewidth=1.6,
-                    label=f"{arch} ({mode})")
+                    label=f"{arch} ({MODELAB[mode]})")
             for k, (lo, hi) in curves.items():
                 for d_label, srv in [("p50", lo), ("p95", hi)]:
                     be = breakeven(reqs, srv, c)

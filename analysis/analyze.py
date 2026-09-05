@@ -430,7 +430,8 @@ def by_operation(alldf, scenario="constant"):
     if not ops or not targets:
         return sm
     x = np.arange(len(ops)); w = 0.8 / len(targets)
-    fig, ax = plt.subplots(figsize=(9, 5))
+    # legenda fora da área de plotagem: dentro dela cobria a barra de uma das operações
+    fig, ax = plt.subplots(figsize=(11, 5))
     for i, t in enumerate(targets):
         d = sm[sm.target == t].set_index("op").reindex(ops)
         ci = d["p95_ci"].fillna(0)
@@ -443,7 +444,8 @@ def by_operation(alldf, scenario="constant"):
     ax.set_yscale("log")  # as arquiteturas diferem em ordens de grandeza
     ax.set_ylabel("p95 (ms, escala log)")
     ax.set_title(f"Tempo de resposta por operação — {SCNLAB[scenario]}")
-    ax.legend(title="Arquitetura"); ax.grid(axis="y", alpha=0.3)
+    ax.legend(title="Arquitetura", loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0)
+    ax.grid(axis="y", alpha=0.3)
     fig.tight_layout(); fig.savefig(os.path.join(FIG, "bar_by_operation.png"), dpi=150); plt.close(fig)
     return sm
 
