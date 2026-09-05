@@ -249,7 +249,9 @@ def fig_breakeven_band(reqs, subs, frac):
                     rows.append({"subcenario": SUBLAB[k], "arquitetura": arch, "preco": mode,
                                  "duracao": d_label,
                                  "breakeven_req_mes": None if be is None else round(be)})
-    ax.set_xscale("log")
+    # y em log: os pontos de equilíbrio ficam todos abaixo de 200 USD e somem
+    # contra o topo da curva serverless em escala linear
+    ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("Requisições por mês")
     ax.set_ylabel("Custo mensal estimado (USD)")
     ax.set_title("Custo × volume, com sensibilidade (us-east-1)")
